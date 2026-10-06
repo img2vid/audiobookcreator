@@ -1,6 +1,6 @@
 // Copies browser runtime assets from node_modules into public/ so the finished
 // static site never needs a CDN:
-//   - Tesseract.js worker + WASM cores        -> public/ocr/
+//   - Tesseract.js worker & WASM cores        -> public/ocr/
 //   - PDF.js worker                            -> public/pdfjs/
 //   - ONNX Runtime WASM (used by Transformers.js) -> public/ort/
 // Runs automatically before `npm run dev` and `npm run build`.
@@ -51,26 +51,39 @@ const pdfWorker = findFirst([
 if (pdfWorker) copy(pdfWorker, path.join(publicDir, 'pdfjs', 'pdf.worker.min.mjs'));
 
 // --- ONNX Runtime WASM (Transformers.js) ----------------------------------------
-const ortNames = ['ort-wasm-simd-threaded.jsep.mjs', 'ort-wasm-simd-threaded.jsep.wasm'];
-let copiedOrt = 0;
-for (const name of ortNames) {
-  const source = findFirst([
-    nm('@huggingface', 'transformers', 'dist', name),
-    nm('onnxruntime-web', 'dist', name),
-  ]);
-  if (source && copy(source, path.join(publicDir, 'ort', name))) copiedOrt++;
+// Copy EVERY variant. Transformers.js picks the loader/wasm pair at runtime
+// from the actual device (wasm vs WebGPU/JSEP), SIMD support and thread count.
+// local-ai.ts forces numThreads = 1 (GitHub Pages cannot send the COOP/COEP
+// headers multi-threaded WASM needs), which makes the NON-threaded files
+// (e.g. ort-wasm-simd.wasm) the required ones — shipping only the threaded
+// jsep pair breaks local AI on every non-WebGPU machine with a 404 on
+// /ort/ort-wasm-simd.wasm and a silent fallback to the rule-based engine.
+const ortDirs = [
+  nm('@huggingface', 'transformers', 'dist'),
+  nm('onnxruntime-web', 'dist'),
+];
+const copiedOrtNames = new Set();
+for (const dir of ortDirs) {
+  if (!fs.existsSync(dir)) continue;
+  for (const name of fs.readdirSync(dir)) {
+    if (!/^ort-wasm.*\.(mjs|wasm)$/.test(name)) continue;
+    if (copy(path.join(dir, name), path.join(publicDir, 'ort', name))) {
+      copiedOrtNames.add(name);
+    }
+  }
 }
+const copiedOrt = copiedOrtNames.size;
 
 console.log(
   `Local browser assets prepared: Tesseract worker=${Boolean(worker)}, core variants=${copiedCore}/${EXPECTED_CORES}, ` +
-  `PDF worker=${Boolean(pdfWorker)}, ONNX runtime=${copiedOrt}/${ortNames.length}.`,
+  `PDF worker=${Boolean(pdfWorker)}, ONNX runtime variants=${copiedOrt}.`,
 );
 
 const missing = [];
 if (!worker) missing.push('tesseract.js/dist/worker.min.js');
 if (copiedCore < EXPECTED_CORES) missing.push('tesseract.js-core browser WASM core files');
 if (!pdfWorker) missing.push('pdfjs-dist/.../pdf.worker.min.mjs');
-if (copiedOrt < ortNames.length) missing.push('@huggingface/transformers/dist/ort-wasm-simd-threaded.jsep.{mjs,wasm}');
+if (copiedOrt === 0) missing.push('onnxruntime-web / @huggingface/transformers ort-wasm*.{mjs,wasm}');
 if (missing.length) {
   console.warn('Some local assets are missing — run `npm install` first. OCR / local-AI features need them:');
   for (const item of missing) console.warn(` - ${item}`);
