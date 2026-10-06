@@ -1,0 +1,82 @@
+# Builds the static site and publishes it to GitHub Pages.
+#
+# One-time setup:  repo Settings → Pages → Build and deployment → Source: "GitHub Actions".
+# Then push to `main` (or run this workflow manually from the Actions tab).
+#
+# Optional repository variable (Settings → Secrets and variables → Actions → Variables):
+#   AUTOBOOK_MODEL = 360m (default) | 135m | none
+#     Which AutoBook AI model to download from Hugging Face and bundle into the
+#     deployed site. The ONNX weights are far above GitHub's 100 MB file limit, so
+#     they are fetched during the build instead of being committed to git.
+#     Use "none" to deploy without the language model (AutoBook then uses its
+#     built-in rule-based resolver).
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Work out the site base path
+        run: |
+          REPO="${GITHUB_REPOSITORY#*/}"
+          if [[ "$REPO" == *.github.io ]]; then
+            echo "NEXT_PUBLIC_BASE_PATH=" >> "$GITHUB_ENV"        # user/organisation site: served from /
+          else
+            echo "NEXT_PUBLIC_BASE_PATH=/$REPO" >> "$GITHUB_ENV"  # project site: served from /<repo>/
+          fi
+
+      - uses: actions/configure-pages@v6
+
+      - run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      # Both steps skip files that are already committed, and never block the deploy.
+      - name: Fetch OCR language data (if not committed)
+        continue-on-error: true
+        run: node scripts/fetch-assets.mjs ocr
+
+      - name: Fetch AutoBook AI model (if not committed)
+        if: ${{ vars.AUTOBOOK_MODEL != 'none' }}
+        continue-on-error: true
+        run: node scripts/fetch-assets.mjs model ${{ vars.AUTOBOOK_MODEL || '360m' }}
+
+      - name: Build static site
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
