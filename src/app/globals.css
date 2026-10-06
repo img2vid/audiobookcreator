@@ -1,0 +1,660 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ---------- Openmukti Audiobook Creator polish ---------- */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(0.55 0 0 / 0.28);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.55 0 0 / 0.5);
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: oklch(0.7 0 0 / 0.25);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.7 0 0 / 0.45);
+}
+
+/* Selection accent */
+::selection {
+  background: oklch(0.62 0.24 303 / 0.25);
+}
+
+/* Smooth focus rings */
+:focus-visible {
+  outline: 2px solid oklch(0.62 0.24 303 / 0.6);
+  outline-offset: 2px;
+}
+
+/* Panel cards: soft hover elevation + gradient hairline */
+[data-slot="card"] {
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+[data-slot="card"]:hover {
+  box-shadow: 0 4px 24px -12px oklch(0.3 0.02 300 / 0.25);
+}
+
+/* Waveform / canvas surfaces get a subtle inset ring */
+canvas {
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.04);
+}
+
+/* Slim animated gradient bar used under panel headers */
+.panel-hairline {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, oklch(0.62 0.24 303 / 0.45), transparent);
+}
+
+/* Reduced-motion respect for our decorations */
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="card"],
+  [data-slot="card"]:hover {
+    transition: none;
+    box-shadow: none;
+  }
+}
+
+/* ---------- v1.5 polish ---------- */
+
+/* Micro-interaction: buttons & icon buttons gently compress when pressed */
+[data-slot="button"]:not(:disabled):active {
+  transform: scale(0.975);
+}
+[data-slot="button"] {
+  transition-property: color, background-color, border-color, box-shadow, transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="button"]:not(:disabled):active {
+    transform: none;
+  }
+}
+
+/* Queued job rows slide in when the queue reorders */
+@keyframes job-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.job-row-enter {
+  animation: job-row-in 0.25s ease;
+}
+
+/* Badges with dot separators read better slightly tighter */
+[data-slot="badge"] {
+  gap: 0.25rem;
+}
+
+/* Sidebar active item: soften background shift */
+[data-slot="button"].justify-start {
+  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+/* Toast stack slightly lifted */
+[data-radix-toast-viewport] [data-radix-collection-item] {
+  box-shadow: 0 8px 32px -12px oklch(0.25 0.02 300 / 0.35);
+}
+
+/* ---------- v1.6 polish ---------- */
+
+/* Narrator bubbles: dashed edge reads intentional, not broken */
+.dialogue-narrator-bubble {
+  border-style: dashed;
+  background-image: linear-gradient(135deg, transparent 0%, oklch(0.55 0.02 300 / 0.04) 100%);
+}
+
+/* Envelope points get a soft glow ring so they pop off the waveform */
+.waveform-envelope-active {
+  cursor: crosshair;
+}
+
+/* Subtitle strip under the video timeline: subtle inner shadow like a track lane */
+.subtitle-lane {
+  box-shadow: inset 0 1px 2px oklch(0.2 0.01 300 / 0.18);
+}
+
+/* Cue rows: hover reveal of row actions keeps the list calm */
+.cue-row .cue-row-actions {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.cue-row:hover .cue-row-actions,
+.cue-row:focus-within .cue-row-actions {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cue-row .cue-row-actions {
+    transition: none;
+  }
+}
+
+/* Compressed-format picker entries: tighten the container hint */
+[data-slot="select-item"] .text-muted-foreground {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Focus rings unify violet accent on the new editors */
+.envelope-toolbar button:focus-visible,
+.cue-row input:focus-visible,
+.cue-row textarea:focus-visible {
+  outline: 2px solid oklch(0.62 0.24 303 / 0.6);
+  outline-offset: 1px;
+}
+
+/* ---------- v1.7 polish ---------- */
+
+/* Transcript ghost (interim) line: readable shimmer without stealing focus */
+.transcribe-ghost-line {
+  background-image: linear-gradient(90deg, transparent, oklch(0.72 0.17 163 / 0.10) 35%, transparent 70%);
+  background-size: 220% 100%;
+  animation: transcribe-ghost-sweep 2.4s linear infinite;
+}
+@keyframes transcribe-ghost-sweep {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .transcribe-ghost-line { animation: none; }
+}
+
+/* Active transcript segment during playback: calm emerald edge, no jumpy layout */
+.transcribe-segment-active {
+  box-shadow: inset 2px 0 0 0 oklch(0.63 0.17 163);
+  scroll-margin-block: 4rem;
+}
+
+/* Level meter canvas: soft inset glow reads as a physical meter well */
+.transcribe-meter {
+  box-shadow: inset 0 1px 3px oklch(0.2 0.01 300 / 0.22);
+}
+
+/* REC state wash: violet tint stays subtle in both themes */
+.recording-tint {
+  background-image: linear-gradient(135deg, transparent 55%, oklch(0.6 0.25 303 / 0.07) 100%);
+}
+
+/* Music-bed duck preview canvas blends into its card like the other scopes */
+.duck-preview-canvas {
+  border-radius: 0.5rem;
+  background: oklch(0.2 0.01 300 / 0.06);
+  box-shadow: inset 0 1px 3px oklch(0.2 0.01 300 / 0.14);
+}
+
+/* Codec availability dots: keep rows visually level */
+.codec-dot {
+  transform: translateY(0.5px);
+}
+
+/* Tour dialog: step dots are buttons — generous hit area, quiet resting state */
+.tour-dot {
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+.tour-dot:hover {
+  transform: scale(1.25);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tour-dot { transition: none; }
+  .tour-dot:hover { transform: none; }
+}
+
+/* Dashboard activity rows: keyboard focus ring matches violet accent */
+.activity-row:focus-visible {
+  outline: 2px solid oklch(0.62 0.24 303 / 0.6);
+  outline-offset: 1px;
+}
+
+/* ---------- v1.8 polish ---------- */
+
+/* Speaker chips on cue rows: tiny but legible, no row-height jump */
+.speaker-chip {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  padding: 0.125rem 0.375rem;
+}
+
+/* Project rows: loaded state reads as "open file" without heavy chrome */
+.project-row-loaded {
+  background-image: linear-gradient(90deg, oklch(0.63 0.17 163 / 0.08), transparent 55%);
+  box-shadow: inset 2px 0 0 0 oklch(0.63 0.17 163);
+}
+
+/* REALTIME chip: attention without alarm */
+.realtime-chip {
+  box-shadow: 0 0 0 1px oklch(0.62 0.24 303 / 0.25);
+}
+
+/* Batch-select action bar floats like a transport, not a modal */
+.batch-bar {
+  box-shadow: 0 10px 32px -14px oklch(0.25 0.02 300 / 0.4);
+}
+
+/* Waveform thumbs blend into card surfaces in both themes */
+.asset-wave-thumb {
+  opacity: 0.85;
+}
+
+/* Slash filter: subtle affordance for the "/" shortcut */
+.queue-filter::placeholder {
+  opacity: 0.7;
+}
+
+/* ---------- v1.9 polish ---------- */
+
+/* History step indicator: quiet, monospaced, never shifts layout */
+.history-step {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* Undo/redo buttons read as a pair with a shared inner edge */
+.undo-pair button + button {
+  margin-left: -1px;
+}
+.undo-pair button:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.undo-pair button:last-child {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+/* Speaker filter chips: active state pops without color-clashing the row chips */
+.speaker-filter-chip[data-active='true'] {
+  box-shadow: 0 0 0 1px oklch(0.63 0.17 163 / 0.45);
+}
+
+/* Batch export checkbox rows: estimate column aligns like a receipt */
+.batch-estimate {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Chapter-import dialog textarea: mono input reads as a script, not a form */
+.chapters-paste textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* Segment speaker input: subtle dashed border until filled */
+.segment-speaker-input[data-empty='true'] {
+  border-style: dashed;
+}
+
+/* ---------- v2.0 polish (R11) ---------- */
+
+/* "next" badge: a quiet breath so the eye finds the true head of the queue */
+@keyframes next-badge-breath {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.7 0.15 163 / 0.0); }
+  50% { box-shadow: 0 0 0 3px oklch(0.7 0.15 163 / 0.18); }
+}
+[data-next-job] {
+  animation: next-badge-breath 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-next-job] { animation: none; }
+}
+
+/* Queued rows: grab affordance lives on the whole row once you start dragging,
+   plus a faint emerald halo when the row is the current drop target edge */
+[data-queued-row] {
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+[data-queued-row]:active {
+  cursor: grabbing;
+}
+
+/* Weekly activity chart: columns feel like columns, empty days stay whisper-quiet,
+   and hovering a day lifts its bars by one pixel */
+[data-activity-chart] {
+  container-type: inline-size;
+}
+[data-activity-chart] .group {
+  transition: transform 120ms ease;
+}
+[data-activity-chart] .group:hover {
+  transform: translateY(-1px);
+}
+[data-activity-chart] .group > div {
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.12);
+}
+[data-activity-chart] .group:hover > div {
+  filter: saturate(1.15);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-activity-chart] .group { transition: none; }
+  [data-activity-chart] .group:hover { transform: none; }
+}
+
+/* Duck preview enters an editing instrument state when duck is on */
+.duck-preview-canvas[data-editable='true'] {
+  cursor: crosshair;
+  border-color: oklch(0.62 0.22 305 / 0.4);
+}
+.duck-preview-canvas[data-editable='true']:active {
+  cursor: grabbing;
+}
+
+/* Speaker suggestion chips: high-confidence chips get a soft emerald inner glow,
+   the rest stay amber and unobtrusive — both keep tabular numbers aligned */
+.speaker-suggestion-chip {
+  letter-spacing: 0.01em;
+  backdrop-filter: blur(2px);
+}
+.speaker-suggestion-chip[data-hot='true'] {
+  box-shadow: inset 0 0 6px oklch(0.7 0.15 163 / 0.14);
+}
+
+/* Audiobook & queue insertion lines share a gentle arrival animation */
+@keyframes insert-line-in {
+  from { transform: scaleY(0.4); opacity: 0.4; }
+  to { transform: scaleY(1); opacity: 1; }
+}
+.job-row-enter span.bg-emerald-500,
+.group span.-top-px.h-0\.5,
+.group span.-bottom-px.h-0\.5 {
+  animation: insert-line-in 140ms ease-out;
+}
+
+/* ---------- v2.1 polish (R12 — AutoBook) ---------- */
+
+/* AutoBook hero dropzone: a calm, breathing frame that warms up when a drag
+   hovers, with a violet aurora glow that stays pointer-transparent */
+.ab-dropzone {
+  cursor: pointer;
+}
+.ab-hero-glow {
+  background:
+    radial-gradient(60% 90% at 15% 0%, oklch(0.62 0.22 305 / 0.07), transparent 70%),
+    radial-gradient(50% 80% at 90% 10%, oklch(0.7 0.15 163 / 0.06), transparent 70%);
+  transition: opacity 200ms ease;
+  opacity: 0.6;
+}
+.ab-dropzone:hover .ab-hero-glow,
+.ab-dropzone:focus-visible .ab-hero-glow {
+  opacity: 1;
+}
+.ab-dropzone-hot {
+  animation: dropzone-pulse 1.2s ease-in-out infinite;
+}
+@keyframes dropzone-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.62 0.22 305 / 0.18); }
+  50% { box-shadow: 0 0 0 6px oklch(0.62 0.22 305 / 0.05); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ab-dropzone-hot { animation: none; }
+}
+
+/* Pipeline stage strip: active stage glows with a slow breathing ring and the
+   connector line after it fills violet as if progress were flowing forward */
+.ab-stage-active {
+  animation: stage-breathe 1.6s ease-in-out infinite;
+}
+@keyframes stage-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.62 0.22 305 / 0.25); }
+  50% { box-shadow: 0 0 0 5px oklch(0.62 0.22 305 / 0.06); }
+}
+[data-ab-stage='done'] + div .ab-stage-link,
+.ab-stage-strip [data-ab-stage='done'] .ab-stage-link {
+  background: oklch(0.62 0.22 305 / 0.35);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ab-stage-active { animation: none; }
+}
+
+/* Verdict signal bars: signed weights read as tug-of-war around a center line;
+   rows brighten on hover so the evidence invites inspection */
+.ab-signal-row {
+  transition: background-color 120ms ease;
+  border-radius: 4px;
+  padding: 1px 3px;
+  margin: -1px -3px;
+}
+.ab-signal-row:hover {
+  background-color: oklch(0.55 0.05 0 / 0.06);
+}
+
+/* Cast cards: narrator card carries a permanent violet wash; every card lifts
+   one pixel on hover with a subtle border warm-up */
+.ab-cast-card:hover {
+  transform: translateY(-1px);
+  border-color: oklch(0.62 0.22 305 / 0.35);
+  transition: transform 140ms ease, border-color 140ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ab-cast-card:hover { transform: none; }
+}
+
+/* Script rows: skipped lines get an honest strikethrough with reduced weight,
+   dialogue rows keep their speaker tint flush to the row background */
+.ab-skip-text {
+  text-decoration: line-through;
+  text-decoration-color: oklch(0.55 0.05 0 / 0.45);
+  text-decoration-thickness: 1px;
+}
+.ab-dialogue-row {
+  border-left: 2px solid transparent;
+  transition: border-color 120ms ease;
+}
+.ab-dialogue-row:hover {
+  border-left-color: currentColor;
+}
+.ab-narration-row:hover,
+.ab-marker-row:hover {
+  background-color: oklch(0.55 0.05 0 / 0.04);
+}
+
+/* Output cards get a quiet completion glow once their asset exists */
+.ab-output-card:has([data-ab-output='audio'] .text-emerald-600) {
+  border-color: oklch(0.7 0.15 163 / 0.35);
+}
+
+/* Producing bar: violet shimmer rides the progress track */
+[data-ab-producing] [role='progressbar'] > div {
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    oklch(1 0 0 / 0.25) 50%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  animation: ab-shimmer 1.4s linear infinite;
+}
+@keyframes ab-shimmer {
+  from { background-position: 180% 0; }
+  to { background-position: -80% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-ab-producing] [role='progressbar'] > div { animation: none; }
+}
+
+/* ---------- GUI overflow fixes ---------- */
+
+/* Feature Explorer: category filters must be individually scrollable instead of
+   being squeezed into equal-width ToggleGroup columns. */
+.feature-category-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.55 0 0 / 0.35) transparent;
+}
+.feature-category-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+.feature-category-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.feature-category-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: oklch(0.55 0 0 / 0.28);
+}
+.feature-category-scroll::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.55 0 0 / 0.5);
+}
+.dark .feature-category-scroll {
+  scrollbar-color: oklch(0.7 0 0 / 0.3) transparent;
+}
+.dark .feature-category-scroll::-webkit-scrollbar-thumb {
+  background: oklch(0.7 0 0 / 0.25);
+}
+.dark .feature-category-scroll::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.7 0 0 / 0.45);
+}
+
+/* PC Profiler: grid columns and Radix select values need explicit min-width:0;
+   otherwise long generation/model names overflow and appear to merge. */
+.pc-profiler-select {
+  min-width: 0;
+}
+.pc-profiler-select [data-slot='select-trigger'] {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.pc-profiler-select [data-slot='select-value'] {
+  display: block !important;
+  min-width: 0 !important;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-profiler-select [data-slot='select-content'] {
+  max-width: min(28rem, calc(100vw - 2rem));
+}
+.pc-profiler-select [data-slot='select-item'] {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
