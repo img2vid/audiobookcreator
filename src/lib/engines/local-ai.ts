@@ -1,4 +1,4 @@
-use client';
+'use client';
 
 // ============================================================
 // Openmukti Audiobook Creator — real local language-model director
