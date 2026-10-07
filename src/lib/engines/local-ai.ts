@@ -203,7 +203,9 @@ async function loadModelConfigForDevice(
     ? `https://huggingface.co/${model.source}/resolve/main/config.json`
     : `${modelBasePath(model)}config.json`;
 
-  const response = await fetch(url, { cache: 'no-store' });
+  // Remote configs may be cached normally; local probes stay uncached so edits
+  // to self-hosted files are picked up immediately.
+  const response = await fetch(url, useRemote ? {} : { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`Could not load model config from ${url}: HTTP ${response.status}`);
   }
@@ -225,6 +227,27 @@ async function loadModelConfigForDevice(
   }
 
   return config;
+}
+
+/**
+ * Evict cached remote model files for a Hugging Face repo from every
+ * Cache Storage entry. A truncated download (HF streams large weights chunked,
+ * often without Content-Length) is the classic cause of ONNX "protobuf parsing
+ * failed" on retry — the bad bytes were cached, so every subsequent load reads
+ * them again. Purging forces a fresh download.
+ */
+async function purgeRemoteModelCache(source: string): Promise<void> {
+  try {
+    const keys = await caches.keys();
+    for (const key of keys) {
+      const store = await caches.open(key);
+      for (const req of await store.keys()) {
+        if (req.url.includes(source) && req.url.includes('/onnx/')) {
+          await store.delete(req);
+        }
+      }
+    }
+  } catch { /* Cache API unavailable — ignore */ }
 }
 
 export async function createGenerator(
@@ -317,24 +340,44 @@ export async function createGenerator(
     });
 
     let lastErr: unknown;
-    for (const dtype of dtypesToTry) {
-      try {
-        return await pipeline('text-generation', modelRef, await loadOptions(dtype, device));
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-
-    // If the chosen device failed for every dtype and we were on WebGPU, retry all on CPU/WASM.
-    if (webgpuOk) {
+    const attemptLoad = async (): Promise<any> => {
       for (const dtype of dtypesToTry) {
         try {
-          return await pipeline('text-generation', modelRef, await loadOptions(dtype, 'wasm'));
+          return await pipeline('text-generation', modelRef, await loadOptions(dtype, device));
         } catch (e) {
           lastErr = e;
         }
       }
+
+      // If the chosen device failed for every dtype and we were on WebGPU, retry all on CPU/WASM.
+      if (webgpuOk) {
+        for (const dtype of dtypesToTry) {
+          try {
+            return await pipeline('text-generation', modelRef, await loadOptions(dtype, 'wasm'));
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+      }
+
+      return null; // total failure — caller decides whether to purge and retry
+    };
+
+    let result = await attemptLoad();
+
+    // When loading from Hugging Face, a failure almost always means corrupt or
+    // truncated cached bytes (the CDN streams large weights without
+    // Content-Length). Evict the cached model files and try the download once
+    // more before giving up.
+    if (!result && useRemote) {
+      await purgeRemoteModelCache(model.source);
+      const rechecked = await getLocalAIStatus(model.id).catch(() => null);
+      if (!rechecked?.ready) {
+        result = await attemptLoad();
+      }
     }
+
+    if (result) return result;
 
     throw lastErr instanceof Error
       ? lastErr
