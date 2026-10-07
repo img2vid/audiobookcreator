@@ -1,4 +1,4 @@
-'use client';
+use client';
 
 // ============================================================
 // Openmukti Audiobook Creator — real local language-model director
@@ -653,8 +653,16 @@ export async function analyzeWithLocalAI(
 ): Promise<LocalAiEnhancement> {
   const model = getLocalAiModel(options?.modelId ?? DEFAULT_LOCAL_AI_MODEL_ID);
   const onProgress = options?.onProgress;
+
+  // CORRECTED: missing local model files are no longer fatal. Previously this
+  // threw when `status.ready` was false, which silently forced the deterministic
+  // fallback even though createGenerator() can download the model once from the
+  // registry `source` (Hugging Face) and cache it in the browser. We still probe
+  // the status so the UI message accurately reflects "first use will download".
   const status = await getLocalAIStatus(model.id);
-  if (!status.ready) throw new Error(status.message);
+  if (!status.ready) {
+    onProgress?.(0.01, status.message);
+  }
 
   onProgress?.(0.02, `Loading ${model.label}…`);
   const generator = await createGenerator(model);
@@ -781,7 +789,9 @@ export async function analyzeWithLocalAI(
 
   onProgress?.(0.97, 'AI director: applying confidence-checked decisions…');
   const notes: string[] = [
-    `Used ${model.label} locally with remote model loading disabled.`,
+    status.ready
+      ? `Used ${model.label} locally with remote model loading disabled.`
+      : `Used ${model.label} via a one-time download from ${model.source}; it is now cached in this browser.`,
     `AI reviewed ${decisions.length} dialogue lines; deterministic attribution remains the fallback for the rest.`,
   ];
   if (options?.deep) {
