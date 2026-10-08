@@ -1,9 +1,24 @@
 // ============================================================
 // Openmukti Audiobook Creator — local formant speech synthesis engine
 // A genuine, fully in-browser TTS engine: text normalization →
-// English grapheme-to-phoneme rules → formant synthesis via
-// OfflineAudioContext (glottal source + 3-formant filters).
+// English grapheme-to-phoneme rules → parametric synthesis via
+// OfflineAudioContext (natural glottal source + 4-formant bank).
 // No network, no models to download, no uploads.
+//
+// v2 naturalness overhaul (fixes robotic / "mechanically beeping" output):
+//   • Continuous per-sentence glottal source rendered sample-by-sample
+//     (Rosenberg-style pulses) with cycle-to-cycle pitch JITTER, amplitude
+//     SHIMMER, slow VIBRATO and F0 drift — the old fixed PeriodicWave
+//     oscillator was perfectly periodic, which is exactly what beeped.
+//   • All voiced phones are sliced from that ONE continuous source, so the
+//     waveform never resets at phone boundaries (no more clicks/chirps).
+//   • Coarticulated formants: filter frequencies glide between adjacent
+//     phones via smoothstep curves instead of hard-stepping.
+//   • Natural prosody: declination, accent gestures, stress & phrase-final
+//     lengthening, randomized word gaps and ±8 % duration jitter (seeded,
+//     deterministic per text).
+//   • Realistic formant bandwidths + 4th formant + spectral tilt + soft-clip
+//     master bus; raised-cosine envelopes instead of linear trapezoids.
 // ============================================================
 import type { SynthOptions, VoiceProfileDef } from '@/lib/types';
 import { concatenateBuffers } from '@/lib/engines/dsp';
@@ -259,12 +274,15 @@ export function normalizeText(input: string): string {
     const part = ap ? (/a/i.test(ap) ? ' A M' : ' P M') : '';
     return numberToWords(hh) + ' ' + (min === '00' ? 'o\'clock' : numberToWords(parseInt(min))) + part;
   });
-  // currency
+  // currency (cents read from the raw digits — e.g. $3.50 → "three dollars fifty cents")
   t = t.replace(/\$\s?([\d,]+(?:\.\d+)?)/g, (_m, n) => {
-    const num = parseFloat(String(n).replace(/,/g, ''));
-    const [int, dec] = String(num).split('.');
+    const raw = String(n).replace(/,/g, '');
+    const [int, dec] = raw.split('.');
     let out = numberToWords(parseInt(int)) + ' dollars';
-    if (dec) out += ' ' + numberToWords(parseInt(dec)) + ' cents';
+    if (dec) {
+      const cents = parseInt(dec.length === 1 ? dec + '0' : dec, 10);
+      if (cents > 0) out += ' ' + numberToWords(cents) + (cents === 1 ? ' cent' : ' cents');
+    }
     return out;
   });
   t = t.replace(/€\s?([\d,]+(?:\.\d+)?)/g, (_m, n) => numberToWords(parseFloat(String(n).replace(/,/g, ''))) + ' euros');
@@ -368,69 +386,273 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
   }
   return toks.filter((t) => P[t.key]);
 }
+// ---------- deterministic seeded RNG (natural, reproducible variation) ----------
+export function hashString(s: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+const smoothstep = (u: number): number => u * u * (3 - 2 * u);
 
 // ---------- synthesis ----------
 const QUALITY_RATE: Record<string, number> = { fast: 16000, balanced: 22050, high: 32000, max: 44100 };
+
+/** Profiles that intentionally keep a flat pitch contour (stylized voices). */
+const FLAT_PROFILES = new Set(['mono-flat', 'chip-robotic']);
 
 interface ScheduledPhone {
   def: PhoneDef;
   start: number; // sec
   dur: number; // sec
   stress: boolean;
-  f0: number;
-  nextVowelF?: [number, number, number];
+  f0Start: number;
+  f0Mid: number;
+  f0End: number;
+  gain: number; // per-phone intensity multiplier
+  formants: [number, number, number] | null; // timbre-scaled F1..F3 targets
+  enter: [number, number, number] | null; // coarticulation entry (previous target)
+  exit: [number, number, number] | null; // anticipatory target (next vowel)
+  nasal: boolean;
+}
+
+export type { ScheduledPhone };
+
+function isVoicedType(t: PhoneType): boolean {
+  return t === 'vowel' || t === 'nasal' || t === 'glide' || t === 'liquid' || t === 'rhotic' ||
+    t === 'fric-v' || t === 'stop-v' || t === 'affr-v';
 }
 
 export function estimateSpeechDurationSec(text: string, rate: number): number {
   const words = text.trim().split(/\s+/).filter(Boolean).length;
-  const wpm = 165 * Math.max(0.25, rate);
+  // 150 wpm accounts for lengthening, accents and breathing pauses added by the v2 prosody model
+  const wpm = 150 * Math.max(0.25, rate);
   return Math.max(0.2, (words / wpm) * 60);
 }
 
-function planSentence(sentence: string, opts: SynthOptions, profile: VoiceProfileDef, contour: (i: number, n: number) => number): ScheduledPhone[] {
+function differs3(a: [number, number, number], b: [number, number, number]): boolean {
+  return Math.abs(a[0] - b[0]) > 12 || Math.abs(a[1] - b[1]) > 24 || Math.abs(a[2] - b[2]) > 40;
+}
+
+function planSentence(
+  sentence: string,
+  opts: SynthOptions,
+  profile: VoiceProfileDef,
+  rng: () => number,
+  endPunct: '.' | '?' | '!',
+): ScheduledPhone[] {
   const norm = normalizeText(sentence);
   const words = norm.split(/\s+/).filter(Boolean);
   const rate = Math.max(0.25, opts.rate);
+  const flat = FLAT_PROFILES.has(profile.id);
+  const base = Math.max(55, profile.basePitchHz * opts.pitch);
+  const n = Math.max(1, words.length);
+  const timbre = profile.timbre;
+
+  // --- pass 1: lay out phones with jittered durations and natural gaps ---
   const phones: ScheduledPhone[] = [];
+  const wordOf: number[] = [];
   let t = 0;
   for (let wi = 0; wi < words.length; wi++) {
     const word = words[wi];
     const toks = wordToPhones(word);
     if (toks.length === 0) continue;
+    const isLastWord = wi === n - 1;
     for (let pi = 0; pi < toks.length; pi++) {
       const def = P[toks[pi].key];
       if (!def || def.type === 'silence') continue;
-      let dur = (def.dur / 1000) / rate;
-      if (toks[pi].stress && def.type === 'vowel') dur *= 1.18;
-      const f0 = profile.basePitchHz * opts.pitch * contour(wi, words.length) * (toks[pi].stress ? 1.05 : 1);
-      const nextVowelF = (() => {
-        for (let j = pi + 1; j < toks.length; j++) {
-          const d = P[toks[j].key];
-          if (d?.type === 'vowel') return d.f;
-        }
-        return undefined;
-      })();
-      phones.push({ def, start: t, dur, stress: toks[pi].stress, f0, nextVowelF });
+      let dur = def.dur / 1000 / rate;
+      dur *= 0.92 + rng() * 0.16; // ±8 % natural duration jitter
+      const stressed = toks[pi].stress && def.type === 'vowel';
+      if (stressed) dur *= 1.3; // stressed vowels carry the rhythm
+      if (isLastWord && pi >= toks.length - 2) dur *= 1.2; // phrase-final lengthening
+      let gain = 1;
+      if (stressed) gain *= 1.16;
+      if (isLastWord) gain *= 0.95; // soft landing
+      const formants = def.f
+        ? ([def.f[0] * timbre, def.f[1] * timbre, def.f[2] * timbre] as [number, number, number])
+        : null;
+      phones.push({
+        def, start: t, dur, stress: stressed,
+        f0Start: base, f0Mid: base, f0End: base, gain,
+        formants, enter: null, exit: null,
+        nasal: def.type === 'nasal',
+      });
+      wordOf.push(wi);
       t += dur;
     }
-    t += 0.045 / rate; // word gap
-    if (/[,]$/.test(word)) t += 0.1 / rate;
+    t += (0.026 + rng() * 0.036) / rate; // word gap 26–62 ms (was a flat 45 ms)
+    if (/[,;:]$/.test(word)) t += (0.1 + rng() * 0.09) / rate; // clause pause
+  }
+  if (phones.length === 0) return phones;
+
+  // --- pass 2: word-level F0 knots (declination / question rise / emphasis) ---
+  const wordF0 = new Array<number>(words.length).fill(base);
+  for (let wi = 0; wi < words.length; wi++) {
+    const u = wi / n;
+    let m: number;
+    if (flat) m = 1;
+    else if (endPunct === '?') m = 1.02 + 0.14 * u; // rising question
+    else if (endPunct === '!') m = 1.05 - 0.09 * u; // emphatic fall
+    else m = 1.055 - 0.145 * u; // declarative declination
+    wordF0[wi] = Math.max(55, base * m);
+  }
+
+  // --- pass 3: smooth per-phone F0 (removes word-to-word steps), add accents ---
+  const raw = wordOf.map((wi) => wordF0[wi]);
+  const smoothed = raw.slice();
+  for (let i = 1; i < phones.length - 1; i++) {
+    smoothed[i] = 0.25 * raw[i - 1] + 0.5 * raw[i] + 0.25 * raw[i + 1];
+  }
+  if (phones.length > 1) {
+    smoothed[0] = 0.5 * raw[0] + 0.5 * raw[1];
+    smoothed[phones.length - 1] = 0.5 * raw[raw.length - 2] + 0.5 * raw[raw.length - 1];
+  }
+  for (let i = 0; i < phones.length; i++) {
+    const ph = phones[i];
+    const f0 = smoothed[i];
+    if (flat) {
+      ph.f0Start = f0;
+      ph.f0Mid = f0;
+      ph.f0End = f0;
+    } else if (ph.stress && ph.def.type === 'vowel') {
+      // accent gesture: gentle rise-fall across the vowel
+      ph.f0Start = f0 * 1.02;
+      ph.f0Mid = f0 * 1.07;
+      ph.f0End = f0 * 0.985;
+    } else {
+      const glide = ph.def.type === 'vowel' ? 0.995 : 0.99; // slight natural fall
+      ph.f0Start = f0;
+      ph.f0Mid = (f0 * (1 + glide)) / 2;
+      ph.f0End = f0 * glide;
+    }
+  }
+
+  // --- pass 4: coarticulation — formants glide instead of stepping ---
+  for (let i = 0; i < phones.length; i++) {
+    const ph = phones[i];
+    if (!ph.formants) continue;
+    const prev = i > 0 ? phones[i - 1] : null;
+    if (prev && prev.formants && differs3(prev.formants, ph.formants)) ph.enter = prev.formants;
+    if (
+      ph.def.type === 'glide' || ph.def.type === 'liquid' ||
+      ph.def.type === 'rhotic' || ph.def.type === 'nasal'
+    ) {
+      for (let j = i + 1; j < Math.min(phones.length, i + 4); j++) {
+        if (!phones[j].formants) break; // unvoiced interruption
+        if (phones[j].def.type === 'vowel') {
+          ph.exit = phones[j].formants;
+          break;
+        }
+      }
+    }
   }
   return phones;
 }
 
-let glottalWaveCache: { ctx: BaseAudioContext; wave: PeriodicWave } | null = null;
-function getGlottalWave(ctx: BaseAudioContext): PeriodicWave {
-  if (glottalWaveCache && glottalWaveCache.ctx === ctx) return glottalWaveCache.wave;
-  const N = 48;
-  const real = new Float32Array(N);
-  const imag = new Float32Array(N);
-  for (let n = 1; n < N; n++) {
-    imag[n] = (1 / Math.pow(n, 1.12)) * (n % 2 === 1 ? 1 : 0.62); // tilt + slight odd emphasis
+/** Build a smoothstep frequency automation curve for one formant band, or null when a constant suffices. */
+function formantCurve(ph: ScheduledPhone, fi: number): Float32Array | null {
+  if (!ph.formants) return null;
+  const target = ph.formants[fi];
+  const enter = ph.enter ? ph.enter[fi] : null;
+  const exit = ph.exit ? ph.exit[fi] : null;
+  const hasEnter = enter != null && Math.abs(enter - target) > target * 0.02;
+  const hasExit = exit != null && Math.abs(exit - target) > target * 0.02;
+  if (!hasEnter && !hasExit) return null;
+  const K = 22;
+  const arr = new Float32Array(K);
+  for (let k = 0; k < K; k++) {
+    const u = k / (K - 1);
+    let v: number;
+    if (hasEnter && hasExit) {
+      if (u < 0.4) v = (enter as number) + (target - (enter as number)) * smoothstep(u / 0.4);
+      else if (u < 0.62) v = target;
+      else v = target + ((exit as number) - target) * smoothstep((u - 0.62) / 0.38);
+    } else if (hasEnter) {
+      v = u < 0.45 ? (enter as number) + (target - (enter as number)) * smoothstep(u / 0.45) : target;
+    } else {
+      v = u < 0.6 ? target : target + ((exit as number) - target) * smoothstep((u - 0.6) / 0.4);
+    }
+    arr[k] = Math.max(70, v);
   }
-  const wave = ctx.createPeriodicWave(real, imag, { disableNormalization: false });
-  glottalWaveCache = { ctx, wave };
-  return wave;
+  return arr;
+}
+
+/** Raised-cosine attack / plateau / release envelope — click-free by construction. */
+function phoneEnvelope(dur: number, gain: number): Float32Array {
+  const K = 24;
+  const arr = new Float32Array(K);
+  const atkEnd = Math.min(0.3, 0.024 / Math.max(0.02, dur));
+  const relStart = 1 - Math.min(0.38, 0.032 / Math.max(0.02, dur));
+  for (let k = 0; k < K; k++) {
+    const u = k / (K - 1);
+    let a: number;
+    if (u < atkEnd) a = 0.5 - 0.5 * Math.cos(Math.PI * (u / atkEnd));
+    else if (u > relStart) a = 0.5 + 0.5 * Math.cos(Math.PI * ((u - relStart) / (1 - relStart)));
+    else a = 1;
+    arr[k] = Math.max(0.0006, a * gain);
+  }
+  return arr;
+}
+
+/** Envelope for stop-closure voice bars (ramps out exactly at release). */
+function closureEnvelope(dur: number, gain: number): Float32Array {
+  const K = 12;
+  const arr = new Float32Array(K);
+  for (let k = 0; k < K; k++) {
+    const u = k / (K - 1);
+    const a = u < 0.25
+      ? 0.5 - 0.5 * Math.cos(Math.PI * (u / 0.25))
+      : u > 0.6
+        ? 0.5 + 0.5 * Math.cos(Math.PI * ((u - 0.6) / 0.4))
+        : 1;
+    arr[k] = Math.max(0.0006, a * gain);
+  }
+  return arr;
+}
+
+/** Fricative envelope with slow amplitude modulation so noise never sounds static. */
+function fricativeEnvelope(dur: number, gain: number, rng: () => number): Float32Array {
+  const K = 18;
+  const arr = new Float32Array(K);
+  const wobHz = 5 + rng() * 7;
+  const wph = rng() * Math.PI * 2;
+  for (let k = 0; k < K; k++) {
+    const u = k / (K - 1);
+    let a: number;
+    if (u < 0.2) a = 0.5 - 0.5 * Math.cos(Math.PI * (u / 0.2));
+    else if (u > 0.68) a = 0.5 + 0.5 * Math.cos(Math.PI * ((u - 0.68) / 0.32));
+    else a = 1;
+    const wobble = 1 - 0.16 * (0.5 + 0.5 * Math.sin(2 * Math.PI * wobHz * u + wph));
+    arr[k] = Math.max(0.0006, a * gain * wobble);
+  }
+  return arr;
+}
+
+function softClipCurve(): Float32Array<ArrayBuffer> {
+  const K = 1024;
+  const curve = new Float32Array(K);
+  const drive = 1.6;
+  const norm = Math.tanh(drive);
+  for (let i = 0; i < K; i++) {
+    const x = (i / (K - 1)) * 2 - 1;
+    curve[i] = Math.tanh(drive * x) / norm;
+  }
+  return curve;
 }
 
 function noiseBuffer(ctx: BaseAudioContext): AudioBuffer {
@@ -445,87 +667,223 @@ function noiseBuffer(ctx: BaseAudioContext): AudioBuffer {
   return buf;
 }
 
+/**
+ * Render ONE continuous glottal source for the whole sentence, sample by
+ * sample: Rosenberg-style flow pulses with cycle-to-cycle jitter, shimmer,
+ * vibrato and drift, plus lip-radiation differentiation and a spectral-tilt
+ * low-pass. Voiced phones are later sliced from this buffer, so the source
+ * phase is continuous across the entire sentence — the single biggest
+ * contributor to a human (rather than buzzy/beepy) voice quality.
+ * Exported for engine smoke tests (renders into a caller-provided context).
+ */
+export function buildGlottalBuffer(
+  phones: ScheduledPhone[],
+  profile: VoiceProfileDef,
+  sampleRate: number,
+  totalSec: number,
+  rng: () => number,
+  flat: boolean,
+): AudioBuffer {
+  const N = Math.max(64, Math.ceil(totalSec * sampleRate) + 16);
+  const holder = new OfflineAudioContext(1, N, sampleRate);
+  const buf = holder.createBuffer(1, N, sampleRate);
+  const out = buf.getChannelData(0);
+
+  // F0 knots at phone boundaries (cosine-eased interpolation between them)
+  const kt: number[] = [];
+  const kv: number[] = [];
+  for (const ph of phones) {
+    if (!isVoicedType(ph.def.type)) continue;
+    kt.push(ph.start, ph.start + ph.dur * 0.5, ph.start + ph.dur);
+    kv.push(ph.f0Start, ph.f0Mid, ph.f0End);
+  }
+  if (kt.length === 0) return buf;
+
+  const f0At = (t: number): number => {
+    if (t <= kt[0]) return kv[0];
+    const last = kt.length - 1;
+    if (t >= kt[last]) return kv[last];
+    let lo = 0;
+    let hi = last;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (kt[mid] <= t) lo = mid;
+      else hi = mid;
+    }
+    const u = (t - kt[lo]) / Math.max(1e-6, kt[hi] - kt[lo]);
+    const w = (1 - Math.cos(Math.PI * u)) / 2;
+    return kv[lo] + (kv[hi] - kv[lo]) * w;
+  };
+
+  // Human voices are never perfectly periodic: jitter (F0), shimmer (amp),
+  // vibrato and slow drift break the machine-like regularity.
+  const jitterAmt = flat ? 0.012 : 0.055; // AR(1) walk → ~1–2.5 % cycle-to-cycle
+  const shimmerAmt = flat ? 0.01 : 0.032;
+  const vibDepth = flat ? 0 : 0.0052;
+  const driftDepth = flat ? 0 : 0.004;
+  const vibHz = 4.4 + rng() * 0.9;
+  const vibPhase = rng() * Math.PI * 2;
+  const driftHz = 0.17 + rng() * 0.1;
+  const driftPhase = rng() * Math.PI * 2;
+
+  // Glottal characteristics: higher-pitched voices → slightly larger open quotient.
+  const openQuotient = flat ? 0.55 : clamp(0.58 + (profile.basePitchHz - 110) / 520, 0.52, 0.7);
+  const tiltCut = clamp(2600 * profile.timbre + (profile.basePitchHz >= 170 ? 500 : 0), 1700, 4200);
+  const tiltCoef = Math.exp((-2 * Math.PI * tiltCut) / sampleRate);
+
+  let i = 0;
+  let cyclePos = 0;
+  let period = sampleRate / Math.max(50, f0At(0));
+  let shimmer = 1;
+  let jitterState = 0;
+  let prevFlow = 0;
+  let lpState = 0;
+
+  while (i < N) {
+    if (cyclePos === 0) {
+      const t = i / sampleRate;
+      jitterState = 0.82 * jitterState + 0.18 * (rng() * 2 - 1);
+      const jitter = jitterState * jitterAmt;
+      const drift = driftDepth * Math.sin(2 * Math.PI * driftHz * t + driftPhase);
+      const vibr = vibDepth * Math.sin(2 * Math.PI * vibHz * t + vibPhase);
+      const f0 = Math.max(50, f0At(t) * (1 + jitter + drift + vibr));
+      period = sampleRate / f0;
+      shimmer = 1 + (rng() * 2 - 1) * shimmerAmt;
+    }
+    // Rosenberg-style glottal flow pulse (rise ~42 % of open phase, then close)
+    let flow = 0;
+    const openLen = period * openQuotient;
+    if (cyclePos < openLen) {
+      const tp = openLen * 0.42;
+      if (cyclePos < tp) flow = 0.5 * (1 - Math.cos((Math.PI * cyclePos) / tp));
+      else flow = Math.cos((Math.PI * (cyclePos - tp)) / (2 * (openLen - tp)));
+    }
+    flow *= shimmer;
+    // lip-radiation differentiation (−6 dB/oct) then spectral-tilt low-pass
+    const diff = flow - prevFlow;
+    prevFlow = flow;
+    lpState = (1 - tiltCoef) * diff + tiltCoef * lpState;
+    out[i] = lpState;
+
+    i++;
+    cyclePos += 1;
+    if (cyclePos >= period) cyclePos = 0;
+  }
+
+  // normalize to safe headroom
+  let peak = 0;
+  for (let k = 0; k < N; k++) {
+    const a = Math.abs(out[k]);
+    if (a > peak) peak = a;
+  }
+  if (peak > 1e-6) {
+    const g = 0.72 / peak;
+    for (let k = 0; k < N; k++) out[k] *= g;
+  }
+  return buf;
+}
+
 function renderSentence(
   phones: ScheduledPhone[],
   opts: SynthOptions,
   profile: VoiceProfileDef,
   sampleRate: number,
   tailSec: number,
+  rng: () => number,
 ): Promise<AudioBuffer> {
-  const total = phones.length ? phones[phones.length - 1].start + phones[phones.length - 1].dur : 0.1;
+  const last = phones[phones.length - 1];
+  const total = last.start + last.dur;
   const ctx = new OfflineAudioContext(1, Math.ceil((total + tailSec) * sampleRate), sampleRate);
-  const master = ctx.createGain();
-  master.gain.value = opts.volume * (profile.breath > 0.6 ? 0.55 : 1);
-  master.connect(ctx.destination);
-  const wave = getGlottalWave(ctx);
-  const noise = noiseBuffer(ctx);
+  const whisper = profile.breath > 0.55;
   const timbre = profile.timbre;
-  const flat = profile.id === 'mono-flat' || profile.id === 'chip-robotic';
+
+  // master bus: spectral-tilt shelf → soft clip → volume
+  const bus = ctx.createGain();
+  const shelf = ctx.createBiquadFilter();
+  shelf.type = 'highshelf';
+  shelf.frequency.value = 6800;
+  shelf.gain.value = -4.5;
+  const shaper = ctx.createWaveShaper();
+  shaper.curve = softClipCurve();
+  shaper.oversample = '2x';
+  const master = ctx.createGain();
+  master.gain.value = Math.max(0, Math.min(1.5, opts.volume)) * (whisper ? 0.6 : 1);
+  bus.connect(shelf);
+  shelf.connect(shaper);
+  shaper.connect(master);
+  master.connect(ctx.destination);
+
+  const glottal = buildGlottalBuffer(phones, profile, sampleRate, total, rng, FLAT_PROFILES.has(profile.id));
+  const noise = noiseBuffer(ctx);
 
   for (const ph of phones) {
     const def = ph.def;
     const t0 = ph.start;
     const dur = ph.dur;
-    const F = def.f ? ([def.f[0] * timbre, def.f[1] * timbre, def.f[2] * timbre] as [number, number, number]) : undefined;
-    const F2 = def.f2 ? ([def.f2[0] * timbre, def.f2[1] * timbre, def.f2[2] * timbre] as [number, number, number]) : undefined;
+    const voiced = isVoicedType(def.type);
 
-    const voiced = def.type === 'vowel' || def.type === 'nasal' || def.type === 'glide' ||
-      def.type === 'liquid' || def.type === 'rhotic' || def.type === 'fric-v' || def.type === 'stop-v' || def.type === 'affr-v';
+    if (voiced && ph.formants) {
+      const env = ctx.createGain();
+      env.gain.setValueCurveAtTime(phoneEnvelope(dur, ph.gain), t0, dur);
 
-    if (voiced && F) {
-      const osc = ctx.createOscillator();
-      osc.setPeriodicWave(wave);
-      osc.frequency.setValueAtTime(Math.max(60, ph.f0), t0);
-      if (!flat) {
-        // micro contour within phone
-        osc.frequency.linearRampToValueAtTime(Math.max(60, ph.f0 * (def.type === 'vowel' ? 1.012 : 0.995)), t0 + dur);
-      }
+      // excitation: continuous glottal slice (phase-true across phones)
+      const src = ctx.createBufferSource();
+      src.buffer = glottal;
       const srcGain = ctx.createGain();
-      srcGain.gain.setValueAtTime(0, t0);
-      srcGain.gain.linearRampToValueAtTime(0.9, t0 + Math.min(0.012, dur * 0.2));
-      srcGain.gain.setValueAtTime(0.9, t0 + dur * 0.7);
-      srcGain.gain.linearRampToValueAtTime(0.0001, t0 + dur);
-      osc.connect(srcGain);
-      // 3 formant bandpass filters in parallel
-      for (let fi = 0; fi < 3; fi++) {
-        const bp = ctx.createBiquadFilter();
-        bp.type = 'bandpass';
-        const Q = fi === 0 ? 7 : fi === 1 ? 9 : 11;
-        bp.Q.value = Q;
-        const fStart = F[fi];
-        bp.frequency.setValueAtTime(Math.max(80, fStart), t0);
-        if (F2) bp.frequency.linearRampToValueAtTime(Math.max(80, F2[fi]), t0 + dur);
-        else if (def.type === 'glide' || def.type === 'liquid' && ph.nextVowelF) {
-          const target = ph.nextVowelF ? ph.nextVowelF[fi] * timbre : fStart;
-          bp.frequency.linearRampToValueAtTime(Math.max(80, target), t0 + dur);
-        }
-        const fg = ctx.createGain();
-        fg.gain.value = fi === 0 ? 1 : fi === 1 ? 0.62 : 0.28;
-        srcGain.connect(bp);
-        bp.connect(fg);
-        fg.connect(master);
+      srcGain.gain.value = whisper ? 0.3 : 1;
+      src.connect(srcGain);
+      let exc: AudioNode = srcGain;
+      if (ph.nasal) {
+        // nasal murmur approximation: darkened excitation + softer formant gains
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 1800;
+        lp.Q.value = 0.5;
+        exc.connect(lp);
+        exc = lp;
       }
-      // breath noise mixed into voiced path
-      if (profile.breath > 0.05) {
+      // aspiration / whisper noise through the same vocal tract
+      if (profile.breath > 0.05 || whisper) {
         const nsrc = ctx.createBufferSource();
         nsrc.buffer = noise;
         nsrc.loop = true;
         const nf = ctx.createBiquadFilter();
         nf.type = 'bandpass';
-        nf.frequency.value = F[1] * 1.6;
-        nf.Q.value = 0.6;
+        nf.frequency.value = Math.min(8000, ph.formants[2] * 1.4);
+        nf.Q.value = 0.5;
         const ng = ctx.createGain();
-        ng.gain.setValueAtTime(0.0001, t0);
-        ng.gain.linearRampToValueAtTime(0.16 * profile.breath, t0 + dur * 0.3);
-        ng.gain.linearRampToValueAtTime(0.0001, t0 + dur);
+        ng.gain.value = whisper ? 1.5 : 0.04 + 0.1 * profile.breath;
         nsrc.connect(nf);
         nf.connect(ng);
-        ng.connect(master);
-        nsrc.start(t0, Math.random() * 0.5);
-        nsrc.stop(t0 + dur);
+        ng.connect(exc);
+        nsrc.start(t0, rng() * 0.5);
+        nsrc.stop(t0 + dur + 0.01);
       }
-      // voiced fricative adds frication
-      if (def.type === 'fric-v' && def.band) {
+      exc.connect(env);
+
+      // 4-formant bank with realistic bandwidths (Q derived from F/B, not constant)
+      const nasal = ph.nasal;
+      const freqs = [ph.formants[0], ph.formants[1], ph.formants[2], 3520 * timbre];
+      const bws = [66 + 0.06 * freqs[0], 96 + 0.05 * freqs[1], 150 + 0.03 * freqs[2], 260];
+      const bandGains = nasal ? [0.62, 0.34, 0.18, 0.05] : [1, 0.52, 0.22, 0.09];
+      for (let fi = 0; fi < 4; fi++) {
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.Q.value = Math.max(1.4, freqs[fi] / bws[fi]);
+        const curve = fi < 3 ? formantCurve(ph, fi) : null;
+        if (curve) bp.frequency.setValueCurveAtTime(curve, t0, dur);
+        else bp.frequency.setValueAtTime(Math.max(80, freqs[fi]), t0);
+        const fg = ctx.createGain();
+        fg.gain.value = bandGains[fi];
+        env.connect(bp);
+        bp.connect(fg);
+        fg.connect(bus);
+      }
+
+      // voiced frication (z, v, zh, jh…)
+      if ((def.type === 'fric-v' || def.type === 'affr-v') && def.band) {
+        const fenv = ctx.createGain();
+        fenv.gain.setValueCurveAtTime(fricativeEnvelope(dur, 0.2, rng), t0, dur);
         const nsrc = ctx.createBufferSource();
         nsrc.buffer = noise;
         nsrc.loop = true;
@@ -533,25 +891,13 @@ function renderSentence(
         nf.type = 'bandpass';
         nf.frequency.value = def.band[0];
         nf.Q.value = def.band[1];
-        const ng = ctx.createGain();
-        ng.gain.setValueAtTime(0.0001, t0);
-        ng.gain.linearRampToValueAtTime(0.22, t0 + dur * 0.35);
-        ng.gain.linearRampToValueAtTime(0.0001, t0 + dur);
         nsrc.connect(nf);
-        nf.connect(ng);
-        ng.connect(master);
-        nsrc.start(t0, Math.random() * 0.5);
-        nsrc.stop(t0 + dur);
+        nf.connect(fenv);
+        fenv.connect(bus);
+        nsrc.start(t0, rng() * 0.5);
+        nsrc.stop(t0 + dur + 0.01);
       }
-      if (def.type === 'nasal') {
-        const lp = ctx.createBiquadFilter();
-        lp.type = 'lowpass';
-        lp.frequency.value = 2600;
-        // (simple approximation: reduce brightness via extra lowpass on source path)
-        void lp;
-      }
-      osc.start(t0);
-      osc.stop(t0 + dur + 0.02);
+      src.start(t0, t0, dur + 0.02);
     }
 
     if ((def.type === 'fric-u' || def.type === 'aspirate') && def.band) {
@@ -563,20 +909,35 @@ function renderSentence(
       bp.frequency.value = def.band[0];
       bp.Q.value = def.band[1];
       const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t0);
-      g.gain.linearRampToValueAtTime(def.type === 'aspirate' ? 0.1 : 0.3, t0 + dur * 0.25);
-      g.gain.linearRampToValueAtTime(0.0001, t0 + dur);
+      g.gain.setValueCurveAtTime(fricativeEnvelope(dur, def.type === 'aspirate' ? 0.09 : 0.26, rng), t0, dur);
       nsrc.connect(bp);
       bp.connect(g);
-      g.connect(master);
-      nsrc.start(t0, Math.random() * 0.5);
-      nsrc.stop(t0 + dur);
+      g.connect(bus);
+      nsrc.start(t0, rng() * 0.5);
+      nsrc.stop(t0 + dur + 0.01);
     }
 
     if ((def.type === 'stop-u' || def.type === 'stop-v' || def.type === 'affr-u' || def.type === 'affr-v') && def.burst) {
-      // closure silence then burst
-      const closure = def.type.startsWith('affr') ? 0.02 : dur * 0.55;
-      const burstDur = def.type.startsWith('affr') ? (dur - closure) * 0.9 : 0.012;
+      const isAffr = def.type === 'affr-u' || def.type === 'affr-v';
+      const isVoicedStop = def.type === 'stop-v' || def.type === 'affr-v';
+      const closure = isAffr ? 0.02 : dur * 0.6;
+      // voice bar: continuous glottal excitation through a low formant during closure
+      if (isVoicedStop && def.f) {
+        const vsrc = ctx.createBufferSource();
+        vsrc.buffer = glottal;
+        const bp2 = ctx.createBiquadFilter();
+        bp2.type = 'bandpass';
+        bp2.frequency.value = Math.max(80, def.f[0] * timbre);
+        bp2.Q.value = 5;
+        const vg = ctx.createGain();
+        vg.gain.setValueCurveAtTime(closureEnvelope(closure, 0.16), t0, closure);
+        vsrc.connect(bp2);
+        bp2.connect(vg);
+        vg.connect(bus);
+        vsrc.start(t0, t0, closure + 0.005);
+      }
+      // release burst: shaped noise with fast attack and exponential decay (no clicks)
+      const burstDur = isAffr ? Math.max(0.03, (dur - closure) * 0.85) : 0.015 + rng() * 0.008;
       const nsrc = ctx.createBufferSource();
       nsrc.buffer = noise;
       nsrc.loop = true;
@@ -585,32 +946,36 @@ function renderSentence(
       bp.frequency.value = def.burst[0];
       bp.Q.value = def.burst[1];
       const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t0 + closure);
-      g.gain.linearRampToValueAtTime(def.type.startsWith('affr') ? 0.34 : 0.5, t0 + closure + burstDur * 0.3);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + closure + burstDur);
+      const bg = isAffr ? 0.3 : 0.42;
+      const burstArr = new Float32Array(14);
+      for (let k = 0; k < 14; k++) {
+        const u = k / 13;
+        const a = Math.min(1, u / 0.18);
+        burstArr[k] = Math.max(0.0006, a * bg * Math.exp(-3.2 * u));
+      }
+      g.gain.setValueCurveAtTime(burstArr, t0 + closure, burstDur);
       nsrc.connect(bp);
       bp.connect(g);
-      g.connect(master);
-      nsrc.start(t0 + closure, Math.random() * 0.5);
+      g.connect(bus);
+      nsrc.start(t0 + closure, rng() * 0.5);
       nsrc.stop(t0 + closure + burstDur + 0.01);
-      // voiced stops add brief voicing bar
-      if (def.type === 'stop-v' && def.f) {
-        const osc = ctx.createOscillator();
-        osc.setPeriodicWave(wave);
-        osc.frequency.value = Math.max(60, ph.f0 * 0.9);
-        const vg = ctx.createGain();
-        vg.gain.setValueAtTime(0.0001, t0);
-        vg.gain.linearRampToValueAtTime(0.18, t0 + closure * 0.4);
-        vg.gain.linearRampToValueAtTime(0.0001, t0 + closure);
-        const bp2 = ctx.createBiquadFilter();
-        bp2.type = 'bandpass';
-        bp2.frequency.value = def.f[0] * timbre;
-        bp2.Q.value = 6;
-        osc.connect(bp2);
-        bp2.connect(vg);
-        vg.connect(master);
-        osc.start(t0);
-        osc.stop(t0 + closure + 0.01);
+      // aspiration (voice onset time) after unvoiced stop releases
+      if (!isVoicedStop && !isAffr) {
+        const aspDur = 0.012 + rng() * 0.014;
+        const asrc = ctx.createBufferSource();
+        asrc.buffer = noise;
+        asrc.loop = true;
+        const abp = ctx.createBiquadFilter();
+        abp.type = 'bandpass';
+        abp.frequency.value = Math.max(1200, def.burst[0] * 0.8);
+        abp.Q.value = 0.7;
+        const ag = ctx.createGain();
+        ag.gain.setValueCurveAtTime(closureEnvelope(aspDur, 0.07), t0 + closure + burstDur * 0.6, aspDur);
+        asrc.connect(abp);
+        abp.connect(ag);
+        ag.connect(bus);
+        asrc.start(t0 + closure + burstDur * 0.6, rng() * 0.5);
+        asrc.stop(t0 + closure + burstDur + aspDur + 0.01);
       }
     }
   }
@@ -618,18 +983,22 @@ function renderSentence(
   return ctx.startRendering();
 }
 
-/** Segment text into renderable sentences (kept for chunked rendering). */
+/**
+ * Segment text into renderable units. Every sentence keeps its own segment so
+ * the prosody model can apply per-sentence declination / question rise and a
+ * natural sentence pause; only over-long runs get split at clause punctuation.
+ */
 export function segmentSentences(text: string, maxLen = 400): string[] {
-  const parts = text.replace(/\s+/g, ' ').split(/(?<=[.!?;:])\s+/);
+  const parts = text.replace(/\s+/g, ' ').split(/(?<=[.!?;:])\s+/).filter(Boolean);
   const out: string[] = [];
   let cur = '';
+  const flush = () => {
+    if (cur.trim()) out.push(cur.trim());
+    cur = '';
+  };
   for (const p of parts) {
-    if ((cur + ' ' + p).length > maxLen && cur) {
-      out.push(cur.trim());
-      cur = '';
-    }
     if (p.length > maxLen) {
-      // split on commas / spaces
+      flush();
       let rest = p;
       while (rest.length > maxLen) {
         let cut = rest.lastIndexOf(',', maxLen);
@@ -641,16 +1010,19 @@ export function segmentSentences(text: string, maxLen = 400): string[] {
         rest = rest.slice(cut + 1);
       }
       cur = rest;
-    } else {
-      cur = cur ? cur + ' ' + p : p;
+      continue;
     }
+    if ((cur + ' ' + p).length > maxLen && cur) flush();
+    cur = cur ? cur + ' ' + p : p;
+    // sentence ends → next segment gets its own contour and breathing pause
+    if (/[.!?]["'”’)\]]*$/.test(p.trim())) flush();
   }
-  if (cur.trim()) out.push(cur.trim());
+  flush();
   return out.filter(Boolean);
 }
 
 /**
- * Synthesize speech locally via formant synthesis.
+ * Synthesize speech locally via natural formant synthesis.
  * Returns a rendered AudioBuffer. Fully offline — no network, no uploads.
  */
 export function synthesizeSpeech(
@@ -692,27 +1064,23 @@ async function synthesizeWithProfile(
     throw new Error('Text too long for a single synthesis call (max ~15 minutes). Use the queue to render in chunks.');
   }
 
+  const flat = FLAT_PROFILES.has(profile.id);
+  // deterministic per-text seed → the same text always renders identically,
+  // while jitter/vibrato/pauses still vary naturally within the render
+  const sharedRng = mulberry32(hashString(profile.id + '\u0000' + text));
+  const explicitGap = opts.gapMs != null ? Math.max(0, opts.gapMs) / 1000 : null;
+
   const buffers: AudioBuffer[] = [];
-  const flat = profile.id === 'mono-flat' || profile.id === 'chip-robotic';
-  const contour = (wi: number, n: number) => {
-    if (flat) return 1;
-    // gentle declination with slight rise mid-sentence
-    const base = 1 + 0.05 * Math.cos((wi / Math.max(1, n)) * Math.PI) - 0.06 * (wi / Math.max(1, n));
-    return base;
-  };
-
-  const gapMs = opts.gapMs ?? 0;
-  const tailSec = 0.12 + (gapMs > 0 ? gapMs / 1000 : 0.18);
-
   for (let i = 0; i < sentences.length; i++) {
     const s = sentences[i];
-    // sentence-final intonation: '?' rises, '.' falls, ';' slight fall
-    let contourMod = contour;
-    if (/\?$/.test(s)) contourMod = (wi, n) => (flat ? 1 : 1 + 0.1 * (wi / Math.max(1, n)));
-    else if (/[.;]$/.test(s)) contourMod = (wi, n) => (flat ? 1 : 1 - 0.1 * (wi / Math.max(1, n)));
-    const phones = planSentence(s, opts, profile, contourMod);
+    const trimmed = s.trimEnd();
+    const endPunct = trimmed.endsWith('?') ? ('?' as const) : trimmed.endsWith('!') ? ('!' as const) : ('.' as const);
+    const rng = mulberry32(sharedRng());
+    const phones = planSentence(s, opts, profile, rng, endPunct);
     if (phones.length === 0) continue;
-    const buf = await renderSentence(phones, opts, profile, sampleRate, tailSec);
+    // sentence pause: honor explicit gapMs, else natural 130–300 ms breathing room
+    const pauseSec = explicitGap != null ? explicitGap + rng() * 0.05 : flat ? 0.16 : 0.13 + rng() * 0.17;
+    const buf = await renderSentence(phones, opts, profile, sampleRate, 0.05 + pauseSec, rng);
     buffers.push(buf);
     onProgress?.((i + 1) / sentences.length);
     if (i % 2 === 1) await yieldToUI();
@@ -724,5 +1092,6 @@ async function synthesizeWithProfile(
     return silent.createBuffer(1, Math.round(sampleRate * 0.25), sampleRate);
   }
   if (buffers.length === 1) return buffers[0];
-  return concatenateBuffers(buffers, Math.max(0, (opts.gapMs ?? 180) / 1000));
+  // inter-sentence pauses are baked into each sentence tail — no fixed gap here
+  return concatenateBuffers(buffers, 0);
 }
