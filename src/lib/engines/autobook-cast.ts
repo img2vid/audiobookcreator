@@ -29,6 +29,8 @@ export interface CharacterMeta {
   gender: Gender;
   ageBand: AgeBand;
   role: 'narrator' | 'major' | 'minor';
+  /** Group/plural speaker ("The Soldiers") — gets an ensemble read. */
+  group?: boolean;
   /** Human-readable justification, ordered strongest evidence first. */
   evidence: string[];
 }
@@ -224,9 +226,46 @@ export function inferCharacterMeta(name: string, contextSnippets: string[]): Cha
       evidence.push(`kinship term: ${firstLowerName}`);
     }
   }
-  // --- 2. kinship / role nouns NEAR the name ("kinship term: grandmother") ---
+  // --- 3. given-name database ("first name Emma matches female name database") ---
+  // A known gendered first name OUTRANKS surrounding pronouns AND kinship
+  // nouns heard near the name — those often describe other people in the same
+  // paragraph ("My dear Mr. Bennet," said his lady… must not make Jane male).
+  if (!gender && firstLower) {
+    const db = genderFromNameDatabase(firstLower);
+    if (db === 'female') {
+      gender = 'female';
+      evidence.push(`first name ${capFirst(displayFirst)} matches female name database`);
+    } else if (db === 'male') {
+      gender = 'male';
+      evidence.push(`first name ${capFirst(displayFirst)} matches male name database`);
+    } else if (db === 'neutral') {
+      gender = 'neutral';
+      evidence.push(`first name ${capFirst(displayFirst)} is unisex — no gendered evidence found`);
+    }
+  }
+
+  // --- 3. given-name database ("first name Emma matches female name database") ---
+  // A known gendered first name OUTRANKS surrounding pronouns — those often
+  // belong to other characters mentioned in the same paragraph ("My dear Mr.
+  // Bennet," said his lady… near Jane's name must not make Jane male).
+  if (!gender && firstLower) {
+    const db = genderFromNameDatabase(firstLower);
+    if (db === 'female') {
+      gender = 'female';
+      evidence.push(`first name ${capFirst(displayFirst)} matches female name database`);
+    } else if (db === 'male') {
+      gender = 'male';
+      evidence.push(`first name ${capFirst(displayFirst)} matches male name database`);
+    } else if (db === 'neutral') {
+      gender = 'neutral';
+      evidence.push(`first name ${capFirst(displayFirst)} is unisex — no gendered evidence found`);
+    }
+  }
+
+  // --- 4. kinship / role nouns NEAR the name ("kinship term: grandmother") ---
   // Possessive relatives are someone else's family — "her father's logbook"
-  // says nothing about the bearer's own gender and is skipped.
+  // says nothing about the bearer's own gender and is skipped. Runs only when
+  // the name itself is not in the database.
   if (!gender && nearJoined) {
     ROLE_WORD_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
@@ -246,7 +285,8 @@ export function inferCharacterMeta(name: string, contextSnippets: string[]): Cha
     }
   }
 
-  // --- 3. pronouns near the name ("referred to as “she” in context") ---
+  // --- 5. pronouns near the name ("referred to as “she” in context") ---
+  // Only reached when the name itself is not in the database.
   if (!gender) {
     const zone = nearJoined || joined;
     const female = (zone.match(/\b(?:she|her|hers)\b/g) ?? []).length;
@@ -258,21 +298,6 @@ export function inferCharacterMeta(name: string, contextSnippets: string[]): Cha
     } else if (male > female) {
       gender = 'male';
       evidence.push('referred to as “he” in context');
-    }
-  }
-
-  // --- 4. given-name database ("first name Emma matches female name database") ---
-  if (!gender && firstLower) {
-    const db = genderFromNameDatabase(firstLower);
-    if (db === 'female') {
-      gender = 'female';
-      evidence.push(`first name ${capFirst(displayFirst)} matches female name database`);
-    } else if (db === 'male') {
-      gender = 'male';
-      evidence.push(`first name ${capFirst(displayFirst)} matches male name database`);
-    } else if (db === 'neutral') {
-      gender = 'neutral';
-      evidence.push(`first name ${capFirst(displayFirst)} is unisex — no gendered evidence found`);
     }
   }
 
@@ -449,7 +474,12 @@ function pickProfile(intent: CastIntent, gender: Gender, profiles: VoiceProfileD
     if (byId.has(step.id) && !taken.has(step.id)) return { id: step.id, pitch: step.pitch ?? intent.pitch, reused: false };
   }
   const unused = profiles.filter((p) => !taken.has(p.id));
-  const fallback = unused.find((p) => p.gender === gender) ?? unused.find((p) => p.gender === 'neutral') ?? unused[0];
+  // When the preferred intents are all taken, fall back by gender first, then
+  // by PITCH NEARNESS — a female character must never land on Grandpa (96 Hz)
+  // just because it was the next unused profile, and vice versa.
+  const targetHz = gender === 'female' ? 200 : gender === 'male' ? 120 : 165;
+  const fallback = unused.find((p) => p.gender === gender)
+    ?? [...unused].sort((a, b) => Math.abs(a.basePitchHz - targetHz) - Math.abs(b.basePitchHz - targetHz))[0];
   if (fallback) return { id: fallback.id, pitch: intent.pitch, reused: false };
   for (const step of intent.steps) {
     if (byId.has(step.id)) return { id: step.id, pitch: step.pitch ?? intent.pitch, reused: true };
@@ -458,8 +488,25 @@ function pickProfile(intent: CastIntent, gender: Gender, profiles: VoiceProfileD
 }
 
 /**
+ * Deterministic 32-bit string hash (FNV-1a) — drives per-character voice
+ * differentiation so two characters sharing an exhausted profile still get
+ * audibly distinct rate/pitch combinations. Pure: same name → same hash.
+ */
+function nameHash(name: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/**
  * Cast a character onto a voice profile. Mutates `taken` by adding the chosen id so
- * sequential calls hand out distinct voices while alternatives remain.
+ * sequential calls hand out distinct voices while alternatives remain. When every
+ * profile is already taken the profile is REUSED with a deterministic rate/pitch
+ * offset derived from the character's name — a cast of fifty characters stays
+ * audibly differentiated even though the profile catalog has a dozen voices.
  */
 export function castVoiceFor(meta: CharacterMeta, profiles: VoiceProfileDef[], taken: Set<string>): CastAssignment {
   const intent = intentFor(meta);
@@ -474,11 +521,32 @@ export function castVoiceFor(meta: CharacterMeta, profiles: VoiceProfileDef[], t
   taken.add(pick.id);
   const profile = profiles.find((p) => p.id === pick.id);
   const tag = PROFILE_TAGS[pick.id] ?? 'fallback voice';
-  const reuseNote = pick.reused ? ' — every voice already cast, reusing' : '';
+
+  // Group speakers get a deliberately deeper, slower ensemble read.
+  const isGroup = meta.group === true;
+  const groupShift = { rate: 0.96, pitch: 0.9 };
+
+  let rate = intent.rate;
+  let pitch = pick.pitch;
+  let reuseNote = '';
+  if (pick.reused) {
+    // differentiate: 7 pitch steps × 5 rate steps over ±0.12 / ±0.08 — 35 combos
+    const h = nameHash(meta.name);
+    const pitchStep = (h % 7) - 3; // -3..3
+    const rateStep = (Math.floor(h / 7) % 5) - 2; // -2..2
+    pitch = pick.pitch + pitchStep * 0.04;
+    rate = intent.rate + rateStep * 0.02;
+    reuseNote = ` — profile pool exhausted, differentiated by pitch ${pitchStep > 0 ? '+' : ''}${(pitchStep * 0.04).toFixed(2)}/rate ${rateStep > 0 ? '+' : ''}${(rateStep * 0.02).toFixed(2)}`;
+  }
+  if (isGroup) {
+    rate = Math.min(RATE_MAX, rate * groupShift.rate);
+    pitch = Math.max(PITCH_MIN, pitch * groupShift.pitch);
+  }
+
   return {
     profileId: pick.id,
-    rate: round2(clamp(intent.rate, RATE_MIN, RATE_MAX)),
-    pitch: round2(clamp(pick.pitch, PITCH_MIN, PITCH_MAX)),
+    rate: round2(clamp(rate, RATE_MIN, RATE_MAX)),
+    pitch: round2(clamp(pitch, PITCH_MIN, PITCH_MAX)),
     rationale: `${intent.why} → ${profile?.name ?? pick.id} (${tag})${reuseNote}`,
   };
 }

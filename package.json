@@ -13,6 +13,7 @@
     "preview": "node scripts/serve-out.mjs",
     "start": "node scripts/serve-out.mjs",
     "lint": "eslint .",
+    "test:engine": "node --experimental-loader ./tests/alias-loader.mjs tests/engine.test.mts",
     "typecheck": "tsc --noEmit",
     "clean": "node -e \"for (const d of ['.next','out']) require('fs').rmSync(d,{recursive:true,force:true})\"",
     "prepare:local-assets": "node scripts/prepare-local-assets.mjs",

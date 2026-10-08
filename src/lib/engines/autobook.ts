@@ -6,9 +6,16 @@
 //   1. classifyGenre      fiction vs non-fiction from stylistic signals
 //   2. analyzeStructure   page numbers, TOC, running heads, copyright,
 //                         index and references → marked "do not read"
-//   3. attributeDialogue  who says each quoted line (tag verbs, pronoun
-//                         resolution, vocatives, alternation)
-//   4. casting            via autobook-cast.ts demographics + profiles
+//   3. discoverCharacterNames  UNLIMITED character census from every name
+//                         shape (honorifics, particles, Mc/Mac/O', hyphens,
+//                         vocatives, play labels, letter signatures, aliases)
+//   4. attributeDialogue  who says each quoted line — 18 ranked rules over
+//                         every dialogue convention (curly/straight/single
+//                         quotes, dashes, play colons, continued paragraphs,
+//                         letter signatures), each unit carrying its evidence
+//   5. casting            via autobook-cast.ts demographics + profiles —
+//                         every character keeps a voice (formant
+//                         differentiation when profiles run out)
 //
 // 100% local, zero-download: this IS the lightweight model — a
 // deterministic, explainable NLP engine (every decision carries
@@ -17,6 +24,13 @@
 // ============================================================
 import type { VoiceProfileDef } from '@/lib/types';
 import { castVoiceFor, inferCharacterMeta, withRole, type AgeBand, type CastAssignment, type CharacterMeta, type Gender } from '@/lib/engines/autobook-cast';
+import {
+  VERBS_ALTERNATION, EMOTION_BY_VERB, ROLE_NOUN_SET, roleMetaForPhrase, TITLE_PREFIX,
+  letterSignature, scanQuotes, vocativeNames, PLAY_LINE_RE, isHonorific,
+  NOT_A_NAME_WORDS, COMMON_CAPITALIZED_NON_NAMES, NAME_PARTICLES, NARRATION_BEAT_VERBS,
+  NAME_TOKEN as NAME_TOKEN_SRC,
+  type QuoteSpan,
+} from '@/lib/engines/dialogue-patterns';
 
 // ---------- public types ----------
 export type SkipReason =
@@ -47,6 +61,9 @@ export interface ScriptUnit {
   /** 0-based chapter index (assigned by buildAudiobookScript). */
   chapterIndex: number;
   emotionHint?: 'whisper' | 'urgent' | 'curious' | 'soft';
+  /** Which attribution rule decided the speaker ("tag-after:name",
+   * "vocative", "turn-taking", "continued-speech", "ai:verification"…). */
+  evidence?: string;
 }
 
 export interface BookChapter {
@@ -85,6 +102,8 @@ export interface AutobookMeta {
 export interface AutobookOptions {
   /** Maximum named voices to cast before folding extras into the Narrator. */
   maxCast?: number;
+  /** Safety cap on discovered character names (0/undefined = unlimited). */
+  maxNames?: number;
   genre?: 'auto' | 'force-fiction' | 'force-nonfiction';
   detectChapters?: boolean;
   /** Original file context supplied to the AI director (never spoken aloud). */
@@ -123,61 +142,68 @@ export interface AutobookResult {
 }
 
 // ---------- shared heuristics ----------
-// Multi-word tags ("went on", "called out") must come first so the regex
-// alternation matches them before their single-word prefixes.
-const VERBS = 'went on|put in|broke in|cut in|called out|cried out|spoke up'
-  + '|said|asked|replied|repeated|answered|returned|retorted|countered|objected|protested|insisted|suggested|agreed|admitted|confessed|promised|explained|complained|urged|offered|lied|joked|teased|pleaded|begged|ordered|warned|threatened|reassured|comforted|informed|announced|observed|commented|stated|affirmed|asserted|mentioned|volunteered|quipped|chuckled|laughed|sighed|sobbed|wept|shouted|whispered|muttered|exclaimed|cried|demanded|continued|began|added|called|remarked|declared|murmured|growled|hissed|snapped|breathed|screamed|yelled|bellowed|roared|shrieked|stammered|stuttered|mouthed';
+// The full catalogs (300+ speech verbs, ~400 role nouns, 110+ honorifics)
+// live in dialogue-patterns.ts; here they are composed into the compiled
+// regexes the discovery + attribution passes run per paragraph.
+const VERBS = VERBS_ALTERNATION;
 const VERB_RE = new RegExp(`\\b(${VERBS})\\b`, 'gi');
 /** Internal-monologue verbs: "he thought" means the quote is NOT spoken aloud.
  * THOUGHT_RE itself is built after NAME_TOKEN (below) to avoid TDZ issues. */
-const THOUGHT_VERBS = 'thought|wondered|mused|pondered|reflected|realised|realized|decided|figured';
+const THOUGHT_VERBS = 'thought|wondered|mused|pondered|reflected|realised|realized|decided|figured|recollected|dreamed|dreamt';
+
+/** Name token: capital-led, apostrophes/hyphens allowed (O'Brien, Jean-Luc). */
+const NAME_TOKEN = NAME_TOKEN_SRC;
+/** Honorific prefix regex fragment — used as \b${HONORIFIC_PREFIX}. */
+const HONORIFIC_PREFIX = `(?:${TITLE_PREFIX})`;
+
 /**
  * Descriptive (unnamed) speakers: "said the other girl", "replied the old
  * man", "the little boy answered". The captured phrase must END in a
  * recognised role noun so tags like "said the next morning" are rejected.
  */
-const ROLE_NOUN_SET = new Set([
-  'girl', 'boy', 'man', 'woman', 'child', 'kid', 'children', 'lady', 'gentleman', 'witch', 'wizard',
-  'princess', 'prince', 'king', 'queen', 'maid', 'nun', 'monk', 'friar', 'mistress', 'master',
-  'sister', 'brother', 'mother', 'father', 'grandmother', 'grandfather', 'granny', 'grandpa', 'aunt', 'uncle',
-  'daughter', 'son', 'bride', 'groom', 'waitress', 'waiter', 'actress', 'actor', 'duchess', 'duke',
-  'countess', 'count', 'lord', 'squire', 'hostess', 'host', 'housekeeper', 'nurse', 'doctor',
-  'soldier', 'sailor', 'guard', 'cook', 'farmer', 'merchant', 'stranger', 'traveller', 'traveler',
-  'hunter', 'fisherman', 'shepherd', 'innkeeper', 'shopkeeper', 'miller', 'baker', 'tailor',
-  'blacksmith', 'carpenter', 'knight', 'servant', 'slave', 'captive', 'prisoner', 'giant', 'dwarf',
-  'elf', 'fairy', 'dragon', 'wolf', 'fox', 'cat', 'dog', 'bird', 'owl', 'crow', 'raven', 'lion',
-  'bear', 'horse', 'pony', 'voice', 'creature', 'figure', 'shadow', 'officer', 'captain', 'teacher',
-  'priest', 'driver', 'passenger', 'visitor', 'guest', 'neighbour', 'neighbor', 'twin', 'baby', 'infant',
-]);
 const DESCRIPTIVE_WORDS = String.raw`[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3}`;
-const DESCR_AFTER_RE = new RegExp(`\\b(${VERBS})\\s*,?\\s*(?:the|a|an|this|that)\\s+(${DESCRIPTIVE_WORDS})`, 'i');
-const DESCR_BEFORE_RE = new RegExp(`\\b(?:the|a|an|this|that)\\s+(${DESCRIPTIVE_WORDS})\\s+(${VERBS})\\b`, 'i');
+const ROLE_NOUNS_ALT = [...ROLE_NOUN_SET].sort((a, b) => b.length - a.length).join('|');
+const DESCR_AFTER_RE = new RegExp(`\\b(${VERBS})\\s*,?\\s*(?:the|a|an|this|that|one)\\s+(${DESCRIPTIVE_WORDS})`, 'i');
+const DESCR_BEFORE_RE = new RegExp(`\\b(?:the|a|an|this|that|one)\\s+(${DESCRIPTIVE_WORDS})\\s+(${VERBS})\\b`, 'i');
+/** Role noun must terminate the phrase: "said the next morning" is rejected. */
+function endsInRoleNoun(phrase: string): boolean {
+  const words = phrase.trim().toLowerCase().replace(/\s+/g, ' ').split(/\s+/);
+  if (!words.length) return false;
+  const last = words[words.length - 1];
+  if (ROLE_NOUN_SET.has(last)) return true;
+  if (words.length >= 2 && ROLE_NOUN_SET.has(`${words[words.length - 2]} ${last}`)) return true;
+  return false;
+}
 
-/** Gender/age inference for a descriptive phrase like "the other girl". */
-function descriptiveMeta(phrase: string): { gender: Gender; age?: AgeBand } {
+/** Gender/age inference for a descriptive phrase like "the other girl" —
+ * driven by the role-noun catalog, with pronoun/adjective fallbacks. */
+function descriptiveMeta(phrase: string): { gender: Gender; age?: AgeBand; group?: boolean } {
   const p = phrase.toLowerCase();
-  const age: AgeBand | undefined = /\b(girl|boy|child|kid|children|little|small|young|baby|infant)\b/.test(p)
-    ? 'child'
-    : /\b(old|elderly|aged|ancient|grey|gray|white)\b/.test(p) ? 'elder' : undefined;
-  const gender: Gender = /\b(girl|woman|women|lady|ladies|witch|princess|queen|maid|nun|mistress|sister|mother|grandmother|granny|aunt|daughter|bride|waitress|actress|duchess|countess|hostess|housekeeper|nurse)\b/.test(p)
-    ? 'female'
-    : /\b(boy|man|men|gentleman|gentlemen|prince|king|monk|friar|brother|father|grandfather|grandpa|uncle|son|groom|waiter|actor|duke|count|lord|master|squire|host|wizard)\b/.test(p)
-      ? 'male'
-      : 'neutral';
-  return { gender, age };
+  const meta = roleMetaForPhrase(p);
+  let gender: Gender = meta?.gender ?? 'neutral';
+  let age: AgeBand | undefined = meta?.age;
+  const group = meta?.group ?? false;
+  if (!meta) {
+    if (/\b(she|her|hers|woman|women|girl|lady|ladies|witch|princess|queen|maid|nun|mistress|sister|mother|grandmother|granny|aunt|daughter|bride|waitress|actress|duchess|countess|hostess|housekeeper|nurse)\b/.test(p)) gender = 'female';
+    else if (/\b(he|him|his|man|men|boy|gentleman|gentlemen|prince|king|monk|friar|brother|father|grandfather|grandpa|uncle|son|groom|waiter|actor|duke|count|lord|master|squire|host|wizard)\b/.test(p)) gender = 'male';
+  }
+  if (!age) {
+    if (/\b(girl|boy|child|kid|children|little|small|baby|infant)\b/.test(p)) age = 'child';
+    else if (/\b(old|elderly|aged|ancient|grey|gray|white[- ]haired|wrinkled)\b/.test(p)) age = 'elder';
+    else if (/\b(young|teen|teenager|youthful|adolescent)\b/.test(p)) age = 'young';
+  }
+  return { gender, age, group };
 }
 
 /** "other girl" → "The Other Girl" when the phrase ends in a role noun; else null. */
 function descriptiveName(phrase: string): string | null {
   const words = phrase.trim().toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length || words.length > 4) return null;
-  if (!ROLE_NOUN_SET.has(words[words.length - 1])) return null;
+  if (!endsInRoleNoun(words.join(' '))) return null;
   // reject phrases that are clearly not people/characters
-  if (words.some((w) => /^(morning|evening|afternoon|night|day|week|month|year|time|moment|end|rest|sound|sight|thought)$/.test(w))) return null;
+  if (words.some((w) => /^(morning|evening|afternoon|night|day|week|month|year|time|moment|end|rest|sound|sight|thought|way|thing|place)$/.test(w))) return null;
   return 'The ' + words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
-
-const QUOTE_RE = /“([^”\n]{1,600})”|"([^"\n]{1,600})"/g;
 
 const CHAPTER_WORD_RE = /^\s*(chapter|part|book|act|scene|canto|letter)\s+([\dIVXLCivxlc]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b[.:—–-]?\s*(.*)$/i;
 const SOLO_HEADING_RE = /^\s*(prologue|epilogue|interlude|afterword|foreword|preface|acknowled?gements|dedication)\s*[:.!?—–-]?\s*(.*)$/i;
@@ -196,15 +222,6 @@ const REFERENCE_HEADING_RE = /^\s*(references|bibliography|notes|works cited|fur
 const INDEX_HEADING_RE = /^\s*(index|subject index|general index)\s*:?\s*$/i;
 const COPYRIGHT_RE = /(©|\(c\)|copyright|all rights reserved|isbn|published by|first edition|second edition|printed in)/i;
 const FRONTMATTER_RE = /^(table of contents|contents|about this book|about the author|dedication|epigraph)\s*:?\s*$/i;
-
-const EMOTION_BY_VERB: Record<string, ScriptUnit['emotionHint']> = {
-  whispered: 'whisper', murmured: 'soft', muttered: 'soft', breathed: 'soft', mouthed: 'whisper',
-  sobbed: 'soft', wept: 'soft', pleaded: 'soft', begged: 'soft', comforted: 'soft', reassured: 'soft',
-  shouted: 'urgent', cried: 'urgent', called: 'urgent', demanded: 'urgent', growled: 'urgent', snapped: 'urgent', hissed: 'urgent',
-  screamed: 'urgent', yelled: 'urgent', bellowed: 'urgent', roared: 'urgent', shrieked: 'urgent', threatened: 'urgent',
-  protested: 'urgent', objected: 'urgent', 'cried out': 'urgent', 'called out': 'urgent',
-  asked: 'curious', wondered: 'curious', teased: 'curious', quipped: 'curious', chuckled: 'soft', laughed: 'soft',
-};
 
 function normSpace(s: string): string {
   return s.replace(/[ \t]+/g, ' ').trim();
@@ -430,10 +447,6 @@ export function extractChapters(text: string): StructureChapter[] {
 // 3. Character discovery + dialogue attribution
 // ============================================================
 
-/** Title-honorific prefix optionally glued before a name. */
-const TITLE_PREFIX = String.raw`(?:Mr|Mrs|Miss|Ms|Dr|Sir|Lady|Lord|Aunt|Uncle|Captain|Professor|Doctor)\.?\s+`;
-const NAME_TOKEN = String.raw`[A-Z][\w'-]{1,20}`;
-
 /** Matches "she thought", "Mary wondered", "thought he" — internal monologue. */
 const THOUGHT_RE = new RegExp(
   `\\b(she|he|they|${NAME_TOKEN}(?:\\s+${NAME_TOKEN})?)\\s+(?:${THOUGHT_VERBS})\\b|\\b(?:${THOUGHT_VERBS})\\s+(she|he|they)\\b`,
@@ -474,36 +487,204 @@ const PURE_THOUGHT_RE = new RegExp(
 const TURN_MARKER_RE = /^["'“”‘’(\s]*(?:but|well|no|yes|yeah|why|how|what|where|when|who|which|whose|so|then|still|yet|however|ha|oh|really|indeed|sure|maybe|perhaps|please|look|listen|stop|wait|enough|fine|okay|ok|alright|hush|come|go|tell|show|let|do|don't|can|could|would|will|shall|is|are|was|were|now|see|here|there|never|always|impossible|nonsense|rubbish|liar|coward)\b/i;
 
 /**
- * Find plausible character names: capitalized tokens that appear
- * mid-sentence (never sentence-initial only), next to a speech verb or
- * at least twice, optionally behind an honorific. Deterministic; capped.
+ * UNLIMITED character discovery. Collects every plausible character name from
+ * the WHOLE book (no 24-name cap, no 120k sample cut) across every surface a
+ * name can appear on:
+ *
+ *   1. mid-sentence mentions            — "asked Eleanor whether…"
+ *   2. honorific names                  — "Mrs. Coulter", "Dr. Watson"
+ *   3. multi-token names + particles    — "Anna van der Berg", "de la Cruz"
+ *   4. Mc/Mac/O'/apostrophe/hyphen      — "McTavish", "O'Brien", "Jean-Luc"
+ *   5. title-led names                  — "Queen Eleanor", "Uncle Podge"
+ *   6. vocatives inside dialogue        — "Eleanor, come here!"
+ *   7. named/called/known-as aliases    — "a girl named Lily"
+ *   8. letter/diary signatures          — "Yours sincerely, Eleanor"
+ *   9. play/screenplay speaker labels   — "FIRST WITCH: When shall…"
+ *  10. possessive mentions              — "Eleanor's hand flew…"
+ *
+ * A candidate survives when it is seen ≥2× mid-sentence, OR once next to a
+ * speech verb / vocative / signature / play label / alias pattern. Deterministic
+ * and stable: first-appearance order, no randomness.
  */
-export function discoverCharacterNames(text: string): string[] {
-  const sample = text.slice(0, 120_000);
-  const midSentence = new Map<string, number>();
-  const sentences = sample.split(/(?<=[.!?…])\s+/);
-  for (const sent of sentences) {
-    // find capitalized tokens NOT at position 0 of the sentence
-    const re = new RegExp(`(^|[^.!?…\\s]\\s)(${TITLE_PREFIX})?(${NAME_TOKEN})(?:\\s+${NAME_TOKEN})?`, 'g');
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(sent))) {
-      const full = ((m[2] ?? '') + m[3]).replace(/\s+/g, ' ').trim();
-      if (STOP_WORDS.has(m[3].toLowerCase())) continue;
-      const token = m[3];
-      if (token.length >= 3 && token[0] === token[0].toUpperCase() && /[a-z]/.test(token)) {
-        midSentence.set(full, (midSentence.get(full) ?? 0) + 1);
+export function discoverCharacterNames(text: string, opts?: { maxNames?: number }): string[] {
+  const maxNames = Math.max(0, opts?.maxNames ?? 0); // 0 = unlimited
+  /** display form → score. score: +1 per mention, +2 near a speech verb. */
+  const tally = new Map<string, { score: number; first: number }>();
+  let order = 0;
+  const seen = (name: string, weight = 1): void => {
+    const key = name.replace(/\s+/g, ' ').trim();
+    if (!key) return;
+    const cur = tally.get(key);
+    if (cur) cur.score += weight;
+    else tally.set(key, { score: weight, first: order++ });
+  };
+  const hardCap = maxNames > 0 ? maxNames * 40 + 2000 : 100_000;
+  let processed = 0;
+
+  // ---- process the book in sentence slices (whole text, no sample cut) ----
+  const SLICE = 120_000;
+  for (let off = 0; off < text.length && processed < hardCap; off += SLICE) {
+    const chunk = text.slice(off, off + SLICE);
+    processed += chunk.length;
+
+    // (1-5) capitalized candidates — mid-sentence (strong) and
+    // sentence-initial followed by an action/speech verb ("Eleanor froze.",
+    // "Tomas turned.", "McTavish roared.") which is nearly as strong.
+    // Sentence splitting honors honorific dots and paragraph breaks.
+    const sentences = splitSentences(chunk);
+    for (const sent of sentences) {
+      const re = new RegExp(`(^|[^.!?…\\s]\\s)(${HONORIFIC_PREFIX})?(${NAME_TOKEN})((?:\\s+(?:${NAME_PARTICLES})\\s+${NAME_TOKEN}|\\s+${NAME_TOKEN}){0,2})`, 'g');
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(sent))) {
+        const honorific = (m[2] ?? '').replace(/\s+/g, ' ').trim();
+        const candidate = ((honorific ? honorific + ' ' : '') + m[3] + (m[4] ?? '')).replace(/\s+/g, ' ').trim();
+        const head = m[3];
+        const headLower = head.toLowerCase().replace(/[.'’-]+$/, '');
+        if (STOP_WORDS.has(headLower)) continue;
+        if (!honorific && (NOT_A_NAME_WORDS.has(headLower) || COMMON_CAPITALIZED_NON_NAMES.has(headLower))) continue;
+        if (head.length < 2) continue;
+        // ALL-CAPS words are usually furniture ("STOP", "THE END") — accept
+        // them only via play labels / vocatives below, except ALL-CAPS 2-tokens
+        const isAllCaps = head === head.toUpperCase() && !/[a-z]/.test(head);
+        if (isAllCaps && !/[\s]/.test(candidate)) continue;
+        // possessive gluing: "Eleanor's" captured with trailing 's — trim
+        const cleaned = candidate.replace(/['’]s$/i, '');
+        if (!cleaned || cleaned.length > 44) continue;
+        // sentence-initial candidates need a following action/speech verb
+        const atSentenceStart = m[1] === '^' || m[1] === '';
+        if (atSentenceStart) {
+          const after = sent.slice((m.index ?? 0) + m[0].length).trimStart();
+          const nextWord = (after.match(/^[a-z']+/) ?? [''])[0].toLowerCase();
+          if (!NARRATION_BEAT_VERBS.has(nextWord) && !isSpeechVerbLocal(nextWord)) continue;
+          seen(cleaned, 2);
+          continue;
+        }
+        seen(cleaned, 1);
+      }
+      // (7) alias patterns — "a girl named Lily", "called himself Fenris"
+      const aliasRe = new RegExp(`\\b(?:named|called|christened|dubbed|baptised|baptized|known\\s+as|styled|hight)\\s+((?:${HONORIFIC_PREFIX})?${NAME_TOKEN}(?:\\s+${NAME_TOKEN})?)`, 'gi');
+      let am: RegExpExecArray | null;
+      while ((am = aliasRe.exec(sent))) {
+        const alias = am[1].replace(/\s+/g, ' ').trim();
+        if (!isCapitalLedName(alias)) continue;
+        const headLower = (alias.split(/\s+/).pop() ?? '').toLowerCase();
+        if (alias.length >= 3 && !STOP_WORDS.has(headLower) && !COMMON_CAPITALIZED_NON_NAMES.has(headLower)) {
+          seen(alias, 3); // strong signal — counts as near-verb
+        }
       }
     }
   }
-  const names: string[] = [];
-  for (const [name, count] of midSentence) {
-    // keep names seen ≥2× mid-sentence OR seen once next to a speech verb
-    const esc = escapeName(name);
-    const nearVerb = new RegExp(`\\b(?:${VERBS})\\s+${esc}\\b|\\b${esc}\\s+(?:${VERBS})\\b`, 'i');
-    if (count >= 2 || nearVerb.test(sample)) names.push(name);
-    if (names.length >= 24) break;
+
+  // ---- (2b) verb-adjacent pass over the WHOLE text ("said Eleanor" /
+  // "Eleanor said") — one mention next to a speech verb is enough evidence. ----
+  const verbAdj = new RegExp(`\\b(?:${VERBS})\\s+((?:${HONORIFIC_PREFIX})?${NAME_TOKEN}(?:\\s+${NAME_TOKEN}){0,2})|((?:${HONORIFIC_PREFIX})?${NAME_TOKEN}(?:\\s+${NAME_TOKEN}){0,2})\\s+(?:${VERBS})\\b`, 'gi');
+  let vm: RegExpExecArray | null;
+  while ((vm = verbAdj.exec(text))) {
+    let raw = (vm[1] ?? vm[2] ?? '').replace(/\s+/g, ' ').trim();
+    if (!raw) continue;
+    // the regex runs case-insensitive so "Said"/"SAID" match — but names must stay capital-led
+    if (!isCapitalLedName(raw)) continue;
+    // possessive capture ("said Mr. Bingley’s") — trim before tallying
+    raw = raw.replace(/['’]s$/i, '');
+    // ALL-CAPS single tokens (Gutenberg captions "BENNET", "EDW") are furniture
+    const capsWords = raw.split(/\s+/);
+    if (capsWords.length === 1 && capsWords[0] === capsWords[0].toUpperCase() && capsWords[0].length >= 2) continue;
+    const headLower = (raw.split(/\s+/).pop() ?? '').toLowerCase();
+    // "In went Mr. Collins" — inversion adverbs must not become characters;
+    // "When Darcy replied" — the head word must not be a function word either
+    const headFirst = raw.split(/\s+/)[0].toLowerCase().replace(/\.$/, '');
+    if (STOP_WORDS.has(headFirst) || NOT_A_NAME_WORDS.has(headFirst) || COMMON_CAPITALIZED_NON_NAMES.has(headFirst)) continue;
+    if (STOP_WORDS.has(headLower) || NOT_A_NAME_WORDS.has(headLower) || COMMON_CAPITALIZED_NON_NAMES.has(headLower)) continue;
+    if (raw.length < 3 || raw.length > 44) continue;
+    seen(raw, 3);
   }
-  return names;
+
+  // ---- (6) vocatives + (9) play labels: scan quote-bearing paragraphs ----
+  const paragraphs = text.split(/\n{2,}/);
+  for (const para of paragraphs) {
+    if (processed > hardCap * 2) break;
+    // (9) play/screenplay labels — per LINE, not per paragraph
+    for (const line of para.split(/\n/)) {
+      const play = PLAY_LINE_RE.exec(line);
+      if (!play) continue;
+      const label = (play[1] ?? play[2] ?? '').trim();
+      const words = label.split(/\s+/);
+      const realWords = words.filter((w) => w.length >= 2 && !NOT_A_NAME_WORDS.has(w.toLowerCase()) && !isHonorific(w));
+      if (label && label.length <= 40 && realWords.length >= 1) {
+        const display = words.map((w) => (isHonorific(w) ? w : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join(' ');
+        seen(display, 3);
+      }
+    }
+    // (8b) letter signatures — naturally span lines ("Yours sincerely,\nEleanor")
+    const paraSig = letterSignature(para);
+    if (paraSig && /^[A-Z]/.test(paraSig)) {
+      const headLower = (paraSig.split(/\s+/).pop() ?? '').toLowerCase();
+      if (!STOP_WORDS.has(headLower) && !COMMON_CAPITALIZED_NON_NAMES.has(headLower)) seen(paraSig, 3);
+    }
+    // (6) vocatives — capitalized names addressed inside any quote convention
+    const spans = scanQuotes(para);
+    for (const span of spans) {
+      const q = span.text;
+      if (q.length < 4) continue;
+      // capitalized tokens not at the quote's start are address candidates
+      const re = new RegExp(`(?<![.!?…]\\s)\\b(${NAME_TOKEN})(?=\\s*[,!?.:;—–])`, 'g');
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(q))) {
+        const token = m[1];
+        const lower = token.toLowerCase();
+        if (STOP_WORDS.has(lower) || NOT_A_NAME_WORDS.has(lower) || COMMON_CAPITALIZED_NON_NAMES.has(lower)) continue;
+        if (token.length < 3) continue;
+        // ALL-CAPS tokens are Gutenberg/OCR furniture — play labels come in via PLAY_LINE_RE
+        if (token === token.toUpperCase()) continue;
+        seen(token, 2);
+      }
+    }
+  }
+
+  // ---- survive rule: ≥2 mentions OR ≥3 score (verb/vocative/signature/alias) ----
+  const out: string[] = [];
+  for (const [name, { score }] of tally) {
+    if (score >= 2 || score >= 3) {
+      out.push(name);
+      if (maxNames > 0 && out.length >= maxNames) break;
+    }
+  }
+  out.sort((a, b) => (tally.get(a)?.first ?? 0) - (tally.get(b)?.first ?? 0));
+  return out;
+}
+
+/**
+ * Sentence splitter that honors honorific dots and paragraph breaks:
+ * "Mrs. Coulter stepped in." stays one sentence; "Chapter One\u000a\u000aEleanor
+ * woke…" splits at the newline so prose after a heading starts a sentence.
+ */
+function splitSentences(text: string): string[] {
+  const out: string[] = [];
+  for (const piece of text.split(/\n{1,}/)) {
+    for (const frag of piece.split(/(?<=[.!?…])\s+/)) {
+      const last = out[out.length - 1];
+      if (last && /(?:^|\s)(?:Mr|Mrs|Ms|Dr|Prof|St|Sr|Jr|Messrs|Gen|Col|Maj|Capt|Lt|Sgt|Rev|Hon|Esq)\.?$/i.test(last.trim())) {
+        out[out.length - 1] = `${last} ${frag}`;
+      } else {
+        out.push(frag);
+      }
+    }
+  }
+  return out;
+}
+
+/** Every word capital-led, except name particles ("van der Berg"). Rejects
+ * "The gentlemen"/"You have" junk that the case-insensitive verb-adjacent
+ * pass would otherwise harvest. */
+const PARTICLE_WORD_RE = new RegExp(`^(?:${NAME_PARTICLES})$`, 'i');
+function isCapitalLedName(raw: string): boolean {
+  const words = raw.split(/\s+/);
+  return words.every((w, i) => (i > 0 && PARTICLE_WORD_RE.test(w)) || /^[A-Z]/.test(w));
+}
+
+/** Local speech-verb check (avoids importing the whole catalog twice). */
+function isSpeechVerbLocal(word: string): boolean {
+  return /\b(said|asked|replied|called|shouted|whispered|yelled|screamed|growled|hissed|snapped|began|added|thought|muttered|murmured|exclaimed|declared|announced|demanded|answered|continued|warned|urged|pleaded|insisted|laughed|sobbed|wept|gasped|sighed|grunted|echoed|roared|bellowed|chuckled|ordered|commanded|complained|wondered|recollected)\b/.test(word);
 }
 
 function escapeName(s: string): string {
@@ -513,22 +694,56 @@ function escapeName(s: string): string {
 interface Segment {
   kind: 'narration' | 'quote';
   text: string;
+  span?: QuoteSpan;
 }
 
-function splitQuoted(paragraph: string): Segment[] {
+/**
+ * Multi-convention quote splitter: builds narration/quote segments from every
+ * convention scanQuotes understands (curly/straight doubles, curly/straight
+ * British singles, guillemets, dash paragraphs, continued paragraphs).
+ */
+function splitQuoted(paragraph: string, openConvention: QuoteSpan['convention'] | null): { segments: Segment[]; open: QuoteSpan['convention'] | null } {
+  const spans = scanQuotes(paragraph, { openConvention });
   const segments: Segment[] = [];
   let last = 0;
-  QUOTE_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = QUOTE_RE.exec(paragraph))) {
-    const before = paragraph.slice(last, m.index);
+  let open: QuoteSpan['convention'] | null = openConvention;
+  for (const span of spans) {
+    const before = paragraph.slice(last, span.start);
     if (normSpace(before)) segments.push({ kind: 'narration', text: before });
-    segments.push({ kind: 'quote', text: m[1] ?? m[2] ?? '' });
-    last = m.index + m[0].length;
+    segments.push({ kind: 'quote', text: span.text, span });
+    last = span.end;
+    // track whether speech is still open at the end of the paragraph
+    if (span.convention === 'continued') {
+      open = span.unclosed ? open : null;
+    } else if (span.convention === 'curly-double' || span.convention === 'straight-double'
+      || span.convention === 'curly-single' || span.convention === 'straight-single' || span.convention === 'guillemet') {
+      // a closed span inside narration closes nothing; only an unclosed END span opens speech
+      open = null;
+    } else if (span.convention === 'dash') {
+      open = null;
+    }
   }
   const tail = paragraph.slice(last);
   if (normSpace(tail)) segments.push({ kind: 'narration', text: tail });
-  return segments;
+  // the final span decides the open state for the NEXT paragraph
+  const lastSpan = spans[spans.length - 1];
+  if (lastSpan) {
+    const endsOpen = lastSpan.unclosed === true
+      || ((lastSpan.convention === 'curly-double' || lastSpan.convention === 'straight-double'
+        || lastSpan.convention === 'curly-single' || lastSpan.convention === 'straight-single' || lastSpan.convention === 'guillemet')
+        && paragraph.slice(lastSpan.start, lastSpan.end).indexOf(lastSpan.convention === 'curly-double' ? '”'
+          : lastSpan.convention === 'straight-double' ? '"'
+            : lastSpan.convention === 'curly-single' ? '’'
+              : lastSpan.convention === 'straight-single' ? "'"
+                : '»') === -1);
+    if (endsOpen) open = lastSpan.convention;
+    else if (lastSpan.convention !== 'continued') open = null;
+  } else if (openConvention) {
+    // a narration paragraph with no spans while speech is open: only closing
+    // punctuation would have ended it — scanQuotes already handled the closer
+    open = openConvention;
+  }
+  return { segments, open };
 }
 
 /** Split narration into units of ≤ ~300 chars at sentence boundaries. */
@@ -550,22 +765,37 @@ function chunkNarration(text: string, cap = 300): string[] {
 }
 
 /**
- * The attribution engine. Walks paragraphs, extracts quoted spans and
- * decides WHO speaks, in priority order:
- *   0. internal-monologue tag ("she thought") → Narrator reads it, softly
- *   1. speech-verb tag with a name ("said Eleanor" / "Eleanor said") —
- *      matched ONLY in the tag zones: end of the preceding narration or
- *      start of the following narration (a previous quote's tag never leaks)
+ * The attribution engine. Walks paragraphs, extracts quoted spans (every
+ * convention: curly/straight doubles, British singles, guillemets, em-dash
+ * paragraphs, play colons, continued paragraphs) and decides WHO speaks,
+ * in priority order:
+ *   0.  play/screenplay colon line — "FIRST WITCH: When shall we three…"
+ *   0b. internal-monologue tag ("she thought") → Narrator reads it, softly
+ *   0c. continued speech — a paragraph continuing an unclosed quote keeps
+ *       the speaker of the paragraph that opened it
+ *   1.  speech-verb tag with a name ("said Eleanor" / "Eleanor said"),
+ *       matched ONLY in the tag zones: end of the preceding narration or
+ *       start of the following narration (a previous quote's tag never leaks)
  *   1c. descriptive speaker ("said the other girl" / "the old man replied") —
- *      unnamed role-noun characters become speakers like "The Other Girl"
- *   2. pronoun tag ("she said") → matching-gender speaker from the recent
- *      turn stack, then the pass-1 roster, then the nearest mention
- *   3. action-beat role noun ("the boy hesitated" → the child speaks)
- *   4. nearest character mention right before the quote (action beat)
- *   5. vocative inside the quote → the other speaker in the exchange
- *   6. turn-taking across paragraph breaks: the previous spoken line's
- *      speaker yields to the other participant in the exchange
- *   7. Narrator reads the quote aloud (safe default)
+ *       unnamed role-noun characters become speakers like "The Other Girl"
+ *   1e. inverted pronoun tag ("said he") — archaic but common
+ *   1f. "came the reply/was the answer" → the OTHER participant in the exchange
+ *   1g. "came the voice of an old man" / "a woman's voice asked" → role speaker
+ *   1h. joint tag ("said Eleanor and Thomas") → the first named speaker
+ *   2.  pronoun tag ("she said") → matching-gender speaker from the recent
+ *       turn stack, then the pass-1 roster, then the nearest mention
+ *   2b. possessive action beat ("Her voice trembled.") → matching-gender speaker
+ *   3.  action-beat role noun ("the boy hesitated" → the child speaks; the
+ *       full role-noun catalog with a create-descriptive fallback)
+ *   4.  nearest character mention right before the quote (action beat)
+ *   4c. name-led action beat right after the quote ('"But I can!" Mary stood up.')
+ *   4b. pronoun action beat touching the quote ('"…" He stepped inside.')
+ *   5.  vocative inside the quote → the OTHER speaker in the exchange
+ *   5c. letter/diary signature ("Yours sincerely, Eleanor") signs the quote
+ *   6.  turn-taking across paragraph breaks: the previous spoken line's
+ *       speaker yields to the other participant in the exchange
+ *   7.  Narrator reads the quote aloud (safe default)
+ * Every dialogue unit records WHICH rule decided it in `evidence`.
  * Skip sentinels (@@SKIP:reason@@…@@ENDSKIP@@) re-emerge as struck-through
  * script rows so the review UI can show exactly what will not be read.
  */
@@ -574,24 +804,46 @@ export interface AttributionHints {
   roster?: string[];
   /** Precomputed name → gender (from full-text context). */
   genders?: Record<string, Gender>;
+  /** OUTPUT: demographics of descriptive speakers created on the fly
+   * ("The Other Girl", "The Soldiers") — filled during attribution so the
+   * casting pass can give them the right voice. */
+  descriptiveOut?: Map<string, { gender: Gender; age?: AgeBand; group?: boolean }>;
 }
-
-/** Action-beat role nouns: narration like "the boy hesitated at the door" implies the child speaks next. */
-const BEAT_NOUNS: ReadonlyArray<{ re: RegExp; gender: Gender; age?: AgeBand }> = [
-  { re: /\b(?:the|a|one)\s+(?:young|little|small)\s+boy\b/i, gender: 'male', age: 'child' },
-  { re: /\b(?:the|a|one)\s+(?:young|little|small)\s+girl\b/i, gender: 'female', age: 'child' },
-  { re: /\bthe\s+boy\b/i, gender: 'male', age: 'child' },
-  { re: /\bthe\s+girl\b/i, gender: 'female', age: 'child' },
-  { re: /\b(?:the|an?)\s+old\s+man\b/i, gender: 'male', age: 'elder' },
-  { re: /\b(?:the|an?)\s+old\s+woman\b/i, gender: 'female', age: 'elder' },
-  { re: /\bthe\s+man\b/i, gender: 'male' },
-  { re: /\bthe\s+woman\b/i, gender: 'female' },
-];
 
 const SKIP_SENTINEL_RE = /@@SKIP:([a-z-]+)@@([\s\S]*?)@@ENDSKIP@@/g;
 const KNOWN_SKIP_REASONS = new Set<SkipReason>([
   'page-number', 'running-head', 'toc', 'copyright', 'frontmatter', 'index', 'reference', 'footnote',
 ]);
+
+/** "said he" / "asked she" — archaic inverted pronoun tags. */
+const INVERTED_TAG_RE = new RegExp(`\\b(${VERBS})\\s+(she|he|they)\\b`, 'i');
+/** "came the reply" / "was the answer" — headless responses. */
+const HEADLESS_REPLY_RE = /\b(?:came|was)\s+the\s+(?:stern\s+|curt\s+|quick\s+|immediate\s+)?(reply|answer|response|retort|rejoinder|return)\b/i;
+/** "came the voice of an old man" / "came a woman's voice" */
+const VOICE_CAME_RE = new RegExp(
+  `\\bcame\\s+(?:the\\s+)?(?:voice|voices)\\s+of\\s+(?:an?\\s+|the\\s+|one\\s+)?((?:[a-z]+\\s+){0,2}?(${ROLE_NOUNS_ALT}))\\b`
+  + `|\\b(?:came|in)\\s+(?:an?\\s+)?((?:[a-z]+\\s+){0,2}?(?:${ROLE_NOUNS_ALT}))'s\\s+voice\\b`,
+  'i',
+);
+/** Joint tag: "said Eleanor and Thomas" — attribute to the first, remember both. */
+const JOINT_TAG_RE = new RegExp(`\\b(${VERBS})\\s+((?:${HONORIFIC_PREFIX})?${NAME_TOKEN})(?:\\s+(?:${HONORIFIC_PREFIX})?${NAME_TOKEN})?\\s+and\\s+(?:(?:${HONORIFIC_PREFIX})?${NAME_TOKEN})\\b`, 'i');
+/** Possessive action beat touching a quote: "Her voice trembled." "His words died." */
+const POSSESSIVE_BEAT_RE = /^["'“”‘’(\s]*(her|his|their)\s+(voice|words|tone|eyes|gaze|look|hand|hands|head|face|smile|brow|whisper|breath|heart|arms|lips|cheeks?|throat)\b/i;
+/** Generalized action-beat role noun: "the innkeeper waddled over" → innkeeper speaks. */
+const BEAT_ROLE_RE = new RegExp(`\\b(?:the|a|an|one)\\s+((?:[a-z]+\\s+){0,2}?(${ROLE_NOUNS_ALT}))\\b`, 'i');
+/** Valid play label: all-caps words or title-case 1-3 words. */
+function validPlayLabel(raw: string): string | null {
+  const label = raw.replace(/\s+/g, ' ').trim();
+  if (!label || label.length > 40) return null;
+  const words = label.split(/\s+/);
+  if (!words.length) return null;
+  const allCaps = words.every((w) => w === w.toUpperCase() && /^[A-Z]/.test(w));
+  const titleCase = words.length <= 3 && words.every((w) => /^[A-Z]/.test(w));
+  if (!allCaps && !titleCase) return null;
+  const real = words.filter((w) => w.length >= 1 && !NOT_A_NAME_WORDS.has(w.toLowerCase()) && !isHonorific(w));
+  if (!real.length) return null;
+  return words.map((w) => (isHonorific(w) ? w : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join(' ');
+}
 
 export function attributeDialogue(text: string, knownNames: string[], hints?: AttributionHints): ScriptUnit[] {
   const units: ScriptUnit[] = [];
@@ -603,10 +855,13 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
   const recent: string[] = []; // most-recent-first stack of NAMED speakers
   /** Speaker of the last dialogue unit pushed (drives cross-paragraph turn-taking). */
   let lastDialogueSpeaker: string | null = null;
+  /** Open multi-paragraph speech: the speaker + quote convention to continue. */
+  let openSpeech: { speaker: string; convention: QuoteSpan['convention'] } | null = null;
   /** Demographics of descriptive speakers ("The Other Girl") created on the fly. */
-  const descrMeta = new Map<string, { gender: Gender; age?: AgeBand }>();
+  const descrMeta = new Map<string, { gender: Gender; age?: AgeBand; group?: boolean }>();
   const contexts = new Map<string, string[]>(); // name → context paragraphs (for demographics)
   const ageCache = new Map<string, AgeBand>();
+  const descriptiveOut = hints?.descriptiveOut;
   let uidCounter = 0;
 
   const push = (u: Omit<ScriptUnit, 'id' | 'chapterIndex'>) => {
@@ -631,9 +886,17 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
   };
   const validName = (raw: string): string | null => {
     const name = normSpace(raw);
-    if (!name || name.length > 28) return null;
+    if (!name || name.length > 40) return null;
     const key = name.toLowerCase();
     if (STOP_WORDS.has(key)) return null;
+    // unknown short tokens ("In came Mrs. Bennet") and furniture words are not names
+    if (key.length < 3 && !known.has(key)) return null;
+    if (NOT_A_NAME_WORDS.has(key) || COMMON_CAPITALIZED_NON_NAMES.has(key)) return null;
+    const words = key.split(/\s+/);
+    // a bare role noun ("Duchess said") is the descriptive path's job
+    if (words.length === 1 && ROLE_NOUN_SET.has(key) && !known.has(key)) return null;
+    // a bare honorific ("Mrs. said") is never a name
+    if (words.every((w) => isHonorific(w.replace(/\.$/, '')))) return null;
     if (known.has(key) || CAPTURED_NAME_RE.test(name)) return name;
     return null;
   };
@@ -666,6 +929,12 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
       ?? pool.find((n) => genderOf(n) === gender)
       ?? null;
   };
+  /** The participant whose turn it is NOT: "came the reply" answers the last speaker. */
+  const otherParticipant = (): string | null => {
+    if (!recent.length) return null;
+    if (lastDialogueSpeaker && recent[0] === lastDialogueSpeaker) return recent[1] ?? null;
+    return recent[0];
+  };
 
   for (const paraRaw of paragraphsRaw) {
     if (!paraRaw.trim()) continue;
@@ -693,6 +962,7 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
           text: piece.text.slice(0, 200),
           skipReason: KNOWN_SKIP_REASONS.has(piece.reason) ? piece.reason : 'frontmatter',
         });
+        openSpeech = null; // a skipped furniture block ends any continued speech
         continue;
       }
 
@@ -702,11 +972,36 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
       // whole-paragraph chapter markers become silent units
       if (isChapterHeadingLine(para) || SOLO_HEADING_RE.test(para)) {
         push({ kind: 'skip', speaker: '(skipped)', text: para.slice(0, 120), skipReason: 'marker' });
+        openSpeech = null;
         continue;
       }
 
-      const segments = splitQuoted(para);
+      // (0) play / screenplay colon lines — handled per RAW line, because a
+      // play paragraph holds several speaker lines ("FIRST WITCH: …\nSECOND WITCH: …")
+      const paraLines = piece.text.split(/\n/).map((l) => l.trim()).filter(Boolean);
+      const allPlay = paraLines.length > 0 && paraLines.every((l) => {
+        const pm = PLAY_LINE_RE.exec(l);
+        return !!pm && !!validPlayLabel(pm[1] ?? pm[2] ?? '') && normSpace(pm[3] ?? '').length > 0;
+      });
+      if (allPlay) {
+        for (const line of paraLines) {
+          const pm = PLAY_LINE_RE.exec(line);
+          if (!pm) continue;
+          const label = validPlayLabel(pm[1] ?? pm[2] ?? '');
+          const speech = normSpace(pm[3] ?? '');
+          if (!label || !speech) continue;
+          push({ kind: 'dialogue', speaker: label, text: speech, evidence: 'play-colon' });
+          rememberSpeaker(label);
+          lastDialogueSpeaker = label;
+        }
+        openSpeech = null;
+        continue;
+      }
+
+      const { segments, open } = splitQuoted(para, openSpeech?.convention ?? null);
       const paraQuotes = segments.filter((s) => s.kind === 'quote').length;
+      let lastQuoteSpeaker: string | null = null;
+      let lastQuoteUnclosed = false;
 
       for (let si = 0; si < segments.length; si++) {
         const seg = segments[si];
@@ -744,8 +1039,79 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
         }
 
         // ----- dialogue attribution -----
+        const span = seg.span;
+
+        // (0c) continued speech — same speaker as the paragraph that opened it
+        if (span?.convention === 'continued' && openSpeech) {
+          const carriedSpeaker = openSpeech.speaker;
+          push({ kind: 'dialogue', speaker: carriedSpeaker, text: normSpace(seg.text), evidence: 'continued-speech' });
+          lastQuoteSpeaker = carriedSpeaker;
+          lastQuoteUnclosed = span.unclosed === true;
+          if (!span.unclosed) openSpeech = null;
+          lastDialogueSpeaker = carriedSpeaker;
+          continue;
+        }
+
         const preRaw = si > 0 && segments[si - 1].kind === 'narration' ? segments[si - 1].text : '';
         const postRaw = si + 1 < segments.length && segments[si + 1].kind === 'narration' ? segments[si + 1].text : '';
+        // dash convention: the tag usually trails INSIDE the span ("—Hello, she said.")
+        let spanText = seg.text;
+        let dashTagSpeaker: string | null = null;
+        let dashEmotion: ScriptUnit['emotionHint'] | undefined;
+        if (span?.convention === 'dash') {
+          const tailSents = splitSentences(spanText);
+          const tailSent = normSpace(tailSents[tailSents.length - 1] ?? '');
+          // tag in its own sentence ("—Hello. she said.") or trailing clause
+          // sharing the final sentence ("—Hello, Eleanor complained.")
+          const DASH_CLAUSE_TAG_RE = new RegExp(
+            `,\\s*((?:${HONORIFIC_PREFIX})?${NAME_TOKEN}|she|he|they|(?:the|a|an)\\s+${DESCRIPTIVE_WORDS})\\s+(${VERBS})\\b[^.!?…]*[.!?…]*\\s*$`, 'i');
+          const clauseM = DASH_CLAUSE_TAG_RE.exec(spanText);
+          if (clauseM && clauseM.index > 4) {
+            const tagText = clauseM[0];
+            const nameM = new RegExp(`^((?:${HONORIFIC_PREFIX})?${NAME_TOKEN})$`, 'i').exec(clauseM[1].trim());
+            if (nameM) {
+              dashTagSpeaker = validName(nameM[1].replace(/\s+/g, ' '));
+              dashEmotion = EMOTION_BY_VERB[clauseM[2].toLowerCase()];
+            } else if (/^(she|he|they)$/i.test(clauseM[1].trim())) {
+              dashTagSpeaker = matchByDemographics(clauseM[1].toLowerCase() === 'she' ? 'female' : clauseM[1].toLowerCase() === 'he' ? 'male' : 'neutral');
+              dashEmotion = EMOTION_BY_VERB[clauseM[2].toLowerCase()];
+            } else {
+              const dname = descriptiveName(clauseM[1].replace(/^\s*(?:the|a|an)\s+/i, ''));
+              if (dname) {
+                dashTagSpeaker = dname;
+                if (!descrMeta.has(dname)) {
+                  const meta = descriptiveMeta(clauseM[1]);
+                  descrMeta.set(dname, meta);
+                  descriptiveOut?.set(dname, meta);
+                }
+                dashEmotion = EMOTION_BY_VERB[clauseM[2].toLowerCase()];
+              }
+            }
+            if (dashTagSpeaker) {
+              spanText = normSpace(spanText.slice(0, clauseM.index));
+            }
+          }
+          if (tailSents.length >= 2 && PURE_TAG_RE.test(tailSent)) {
+            const after = new RegExp(`\\b(${VERBS})\\s+(${HONORIFIC_PREFIX})?(${NAME_TOKEN})`, 'i').exec(tailSent)
+              ?? new RegExp(`(${HONORIFIC_PREFIX})?(${NAME_TOKEN})\\s+(${VERBS})\\b`, 'i').exec(tailSent);
+            const dm = DESCR_AFTER_RE.exec(tailSent) ?? DESCR_BEFORE_RE.exec(tailSent);
+            const pron = /\b(she|he)\s+(?:VERBS)\b/i.exec(tailSent);
+            if (after && after[3]) {
+              dashTagSpeaker = validName(`${after[2] ?? ''}${after[3]}`.replace(/\s+/g, ' '));
+              dashEmotion = EMOTION_BY_VERB[after[1].toLowerCase()];
+            } else if (after && after[2]) {
+              dashTagSpeaker = validName(`${after[1] ?? ''}${after[2]}`.replace(/\s+/g, ' '));
+            } else if (dm && descriptiveName(dm[2])) {
+              dashTagSpeaker = descriptiveName(dm[2]);
+              if (dashTagSpeaker && !descrMeta.has(dashTagSpeaker)) descrMeta.set(dashTagSpeaker, descriptiveMeta(dm[2]));
+              dashEmotion = EMOTION_BY_VERB[dm[1].toLowerCase()];
+            }
+            // strip the tag sentence from the spoken text
+            tailSents.pop();
+            spanText = normSpace(tailSents.join(' '));
+          }
+        }
+
         const pre = normSpace(preRaw.slice(-160));
         const post = normSpace(postRaw.slice(0, 160));
         // TAG ZONES: a tag for THIS quote can only sit at the END of the
@@ -765,7 +1131,7 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
         let droppedTag = false;
         {
           const cleaned = preSegFull.replace(/^[\s,;:!?—–-]+\s*/, '');
-          const tagSents = cleaned.match(/[^.!?…]+[.!?…]*\s*/g) ?? [];
+          const tagSents = splitSentences(cleaned);
           const first = normSpace(tagSents[0] ?? '');
           // A pure tag sentence at the START of a between-quotes fragment
           // binds to the PREVIOUS quote — drop it from this quote's context.
@@ -775,40 +1141,65 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
             droppedTag = true;
           }
         }
-        const preSents = preBody.slice(-160).match(/[^.!?…]+[.!?…]*\s*/g) ?? [preBody.slice(-160)];
+        const preSents = splitSentences(preBody.slice(-200));
         const preLead = normSpace(preSents[preSents.length - 1] ?? '');
-        const postSents = post.match(/[^.!?…]+[.!?…]*\s*/g) ?? [post];
+        const postSents = splitSentences(post);
         const postTag = normSpace(postSents[0] ?? '');
         let speaker: string | null = null;
+        let evidence = 'fallback-narrator';
         let emotion: ScriptUnit['emotionHint'] | undefined;
 
-        // (0) internal monologue:  "ABC", she thought. / Mary wondered, "…"
+        if (dashTagSpeaker) {
+          speaker = dashTagSpeaker;
+          evidence = 'tag-dash';
+          emotion = dashEmotion;
+        }
+
+        // (0b) internal monologue:  "ABC", she thought. / Mary wondered, "…"
         //     A trailing thought tag decides immediately; a leading thought tag
         //     only when no speech tag follows the quote ('he lied' beats
         //     'Thomas thought about lying').
         const postHasSpeechTag = new RegExp(`\\b(${VERBS})\\b`, 'i').test(postTag);
-        if (THOUGHT_RE.test(postTag) || (!postHasSpeechTag && THOUGHT_RE.test(preLead))) {
+        // "ABC," she thought. "You forget who taught you." — the follow-up
+        // quote addressing a listener (you/your) is SPOKEN aloud, not thought.
+        const thoughtSandwich = betweenQuotes
+          && PURE_THOUGHT_RE.test(normSpace(splitSentences(preSegFull.replace(/^[\s,;:!?—–-]+\s*/, ''))[0] ?? ''))
+          && /\b(you|your|yours|yourself)\b/i.test(seg.text);
+        if (!speaker && !thoughtSandwich && (THOUGHT_RE.test(postTag) || (!postHasSpeechTag && THOUGHT_RE.test(preLead)))) {
           speaker = 'Narrator';
+          evidence = 'thought-tag';
           emotion = 'soft';
+        }
+        // spoken override: "she thought." still names the speaker via the pronoun
+        if (!speaker && thoughtSandwich) {
+          const pron = new RegExp(`\\b(she|he)\\s+(${VERBS}|${THOUGHT_VERBS})\\b`, 'i').exec(preLead)
+            ?? new RegExp(`\\b(she|he)\\s+(${VERBS}|${THOUGHT_VERBS})\\b`, 'i').exec(postTag);
+          if (pron) {
+            const want: Gender = pron[1].toLowerCase() === 'she' ? 'female' : 'male';
+            speaker = matchByDemographics(want) ?? nearestMention(preBody.slice(-200), 200);
+            if (speaker) evidence = 'thought-sandwich-spoken';
+          }
         }
 
         // (1a) verb-then-name:  said Mrs. Coulter / asked Tom
         if (!speaker) {
-          const after = new RegExp(`\\b(${VERBS})\\s+(${TITLE_PREFIX})?(${NAME_TOKEN})`, 'i');
+          const after = new RegExp(`\\b(${VERBS})\\s+(${HONORIFIC_PREFIX})?(${NAME_TOKEN})`, 'i');
           const afterM = after.exec(postTag) ?? after.exec(preLead);
           if (afterM) {
             emotion = EMOTION_BY_VERB[afterM[1].toLowerCase()];
             speaker = validName(`${afterM[2] ?? ''}${afterM[3]}`.replace(/\s+/g, ' '));
+            if (speaker) evidence = 'tag-after:name';
           }
         }
 
         // (1b) name-then-verb:  Mrs. Coulter said / Tom asked
         if (!speaker) {
-          const before = new RegExp(`(${TITLE_PREFIX})?(${NAME_TOKEN})\\s+(${VERBS})\\b`, 'i');
+          const before = new RegExp(`(${HONORIFIC_PREFIX})?(${NAME_TOKEN})\\s+(${VERBS})\\b`, 'i');
           const beforeM = before.exec(postTag) ?? before.exec(preLead);
           if (beforeM) {
             emotion = EMOTION_BY_VERB[beforeM[3].toLowerCase()];
             speaker = validName(`${beforeM[1] ?? ''}${beforeM[2]}`.replace(/\s+/g, ' '));
+            if (speaker) evidence = 'tag-before:name';
           }
         }
 
@@ -819,7 +1210,12 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
           if (dm && name) {
             emotion = EMOTION_BY_VERB[dm[1].toLowerCase()];
             speaker = name;
-            if (!descrMeta.has(name)) descrMeta.set(name, descriptiveMeta(dm[2]));
+            evidence = 'tag-after:descriptive';
+            if (!descrMeta.has(name)) {
+              const meta = descriptiveMeta(dm[2]);
+              descrMeta.set(name, meta);
+              descriptiveOut?.set(name, meta);
+            }
           }
         }
 
@@ -830,7 +1226,63 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
           if (dm && name) {
             emotion = EMOTION_BY_VERB[dm[2].toLowerCase()];
             speaker = name;
-            if (!descrMeta.has(name)) descrMeta.set(name, descriptiveMeta(dm[1]));
+            evidence = 'tag-before:descriptive';
+            if (!descrMeta.has(name)) {
+              const meta = descriptiveMeta(dm[1]);
+              descrMeta.set(name, meta);
+              descriptiveOut?.set(name, meta);
+            }
+          }
+        }
+
+        // (1e) inverted pronoun tag:  said he / asked she (archaic)
+        if (!speaker) {
+          const inv = INVERTED_TAG_RE.exec(postTag) ?? INVERTED_TAG_RE.exec(preLead);
+          if (inv) {
+            emotion = EMOTION_BY_VERB[inv[1].toLowerCase()];
+            const want: Gender = inv[2].toLowerCase() === 'she' ? 'female' : inv[2].toLowerCase() === 'he' ? 'male' : 'neutral';
+            speaker = matchByDemographics(want) ?? nearestMention(preBody.slice(-200), 200);
+            if (speaker) evidence = 'tag-inverted-pronoun';
+          }
+        }
+
+        // (1f) headless reply:  "No," came the reply. / "Never," was the answer.
+        if (!speaker) {
+          const hr = HEADLESS_REPLY_RE.exec(postTag) ?? HEADLESS_REPLY_RE.exec(preLead);
+          if (hr) {
+            const other = otherParticipant();
+            speaker = other;
+            if (speaker) evidence = 'headless-reply';
+          }
+        }
+
+        // (1g) voice-came:  "Who's there?" came the voice of an old man.
+        if (!speaker) {
+          const vc = VOICE_CAME_RE.exec(postTag) ?? VOICE_CAME_RE.exec(preLead);
+          const phrase = vc ? (vc[1] ?? vc[3] ?? '') : '';
+          const name = phrase ? descriptiveName(phrase) : null;
+          if (vc && name) {
+            speaker = name;
+            evidence = 'voice-came';
+            if (!descrMeta.has(name)) {
+              const meta = descriptiveMeta(phrase);
+              descrMeta.set(name, meta);
+              descriptiveOut?.set(name, meta);
+            }
+          }
+        }
+
+        // (1h) joint tag:  "Bravo!" said Eleanor and Thomas.
+        if (!speaker) {
+          const jm = JOINT_TAG_RE.exec(postTag) ?? JOINT_TAG_RE.exec(preLead);
+          if (jm) {
+            emotion = EMOTION_BY_VERB[jm[1].toLowerCase()];
+            speaker = validName(`${jm[2]}`);
+            if (speaker) {
+              evidence = 'tag-joint';
+              const second = validName(jm[3] ?? '');
+              if (second && second !== speaker) rememberSpeaker(second);
+            }
           }
         }
 
@@ -842,47 +1294,84 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
             emotion = EMOTION_BY_VERB[pronM[2].toLowerCase()];
             const want: Gender = pronM[1].toLowerCase() === 'she' ? 'female' : 'male';
             speaker = matchByDemographics(want) ?? nearestMention(preBody.slice(-200), 200);
+            if (speaker) evidence = 'tag-pronoun';
           }
         }
 
-        // (3) action-beat role noun: "the boy hesitated" → the child speaks
-        //     Searches preBody only — the tag-stripped zone — so a previous
-        //     quote's trailing tag ("said the other girl.") never poisons it.
+        // (2b) possessive action beat touching the quote: "Her voice trembled."
         if (!speaker) {
-          for (const beat of BEAT_NOUNS) {
-            if (beat.re.test(preBody) || beat.re.test(preLead)) {
-              speaker = matchByDemographics(beat.gender, beat.age);
-              if (speaker) break;
+          const pb = POSSESSIVE_BEAT_RE.exec(postTag) ?? POSSESSIVE_BEAT_RE.exec(preLead);
+          if (pb) {
+            const want: Gender = pb[1].toLowerCase() === 'her' ? 'female' : pb[1].toLowerCase() === 'his' ? 'male' : 'neutral';
+            speaker = matchByDemographics(want);
+            if (speaker) evidence = 'beat-possessive';
+          }
+        }
+
+        // (3) action-beat role noun: "the boy hesitated" → the child speaks.
+        //     Generalized over the full role-noun catalog; when no known
+        //     candidate matches the demographics, the beat noun itself becomes
+        //     a descriptive speaker ("The Innkeeper") so unnamed characters
+        //     still get a voice.
+        if (!speaker) {
+          const bm = BEAT_ROLE_RE.exec(preBody) ?? BEAT_ROLE_RE.exec(preLead);
+          if (bm) {
+            const phrase = bm[1];
+            const meta = descriptiveMeta(phrase);
+            const name = descriptiveName(phrase);
+            speaker = matchByDemographics(meta.gender, meta.age) ?? (meta.group || !name ? null : name);
+            if (speaker === name && name && !descrMeta.has(name)) {
+              descrMeta.set(name, meta);
+              descriptiveOut?.set(name, meta);
             }
+            if (speaker) evidence = 'beat-role-noun';
           }
         }
 
         // (4) nearest character mention right before the quote (action beat),
         //     again in the tag-stripped zone only.
-        if (!speaker) speaker = nearestMention(preBody.slice(-140), 140);
+        if (!speaker) {
+          speaker = nearestMention(preBody.slice(-140), 140);
+          if (speaker) evidence = 'beat-nearest-mention';
+        }
 
         // (4c) name-led action beat right AFTER the quote:
         //     '"But I can!" Mary stood up.' — the actor touching the quote
         //     is almost always the one who just spoke.
         if (!speaker) {
-          const leadM = new RegExp(`^(${TITLE_PREFIX})?(${NAME_TOKEN}(?:\\s+${NAME_TOKEN})?)\\b`).exec(postTag);
-          if (leadM) speaker = validName(`${leadM[1] ?? ''}${leadM[2]}`.replace(/\s+/g, ' '));
+          const leadM = new RegExp(`^(${HONORIFIC_PREFIX})?(${NAME_TOKEN}(?:\\s+${NAME_TOKEN})?)\\b`).exec(postTag);
+          if (leadM) {
+            speaker = validName(`${leadM[1] ?? ''}${leadM[2]}`.replace(/\s+/g, ' '));
+            if (speaker) evidence = 'beat-after:name';
+          }
         }
 
         // (4b) pronoun action beat touching the quote: '"…" He stepped inside.'
         //      or 'She glanced up. "…"' — the beat's actor is usually the speaker.
         if (!speaker) {
           const beatM = PRONOUN_BEAT_RE.exec(postTag) ?? PRONOUN_BEAT_RE.exec(preLead);
-          if (beatM) speaker = matchByDemographics(beatM[1].toLowerCase() === 'she' ? 'female' : 'male');
+          if (beatM) {
+            speaker = matchByDemographics(beatM[1].toLowerCase() === 'she' ? 'female' : 'male');
+            if (speaker) evidence = 'beat-pronoun';
+          }
         }
 
         // (5) vocative inside the quote → the OTHER speaker is talking
         if (!speaker && seg.text.length >= 8) {
-          for (const n of recent) {
-            if (n !== recent[0] && new RegExp(`\\b${escapeName(n)}\\b`).test(seg.text)) {
-              speaker = recent[0];
-              break;
-            }
+          const addressed = vocativeNames(seg.text, [...recent, ...roster]);
+          if (addressed.length) {
+            const first = recent.find((n) => !addressed.some((a) => a.toLowerCase() === n.toLowerCase()));
+            speaker = first ?? null;
+            if (speaker) evidence = 'vocative';
+          }
+        }
+
+        // (5c) letter/diary signature: "…Yours sincerely, Eleanor" signs the quote
+        if (!speaker) {
+          const sig = letterSignature(para);
+          if (sig && known.has(sig.toLowerCase())) {
+            speaker = knownNames.find((n) => n.toLowerCase() === sig.toLowerCase()) ?? null;
+            if (speaker) evidence = 'letter-signature';
           }
         }
 
@@ -895,17 +1384,30 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
         //     long as the previous spoken line came from the turn-holder.
         if (!speaker && droppedTag && !TURN_MARKER_RE.test(seg.text) && recent.length >= 1) {
           speaker = recent[0];
+          if (speaker) evidence = 'tag-sandwich-continuation';
         }
         if (!speaker && recent.length >= 2 && (paraQuotes >= 2 || lastDialogueSpeaker === recent[0])) {
           speaker = recent[1];
+          if (speaker) evidence = 'turn-taking';
         }
 
         // (7) fallback — the Narrator reads the quote
         if (!speaker) speaker = 'Narrator';
 
         if (speaker !== 'Narrator') rememberSpeaker(speaker);
-        push({ kind: 'dialogue', speaker, text: normSpace(seg.text), emotionHint: emotion });
+        push({ kind: 'dialogue', speaker, text: normSpace(spanText), emotionHint: emotion, evidence });
+        lastQuoteSpeaker = speaker;
+        lastQuoteUnclosed = span?.unclosed === true;
         lastDialogueSpeaker = speaker;
+      }
+
+      // keep multi-paragraph speech open with the speaker who holds the floor
+      if (lastQuoteSpeaker && lastQuoteUnclosed && open) {
+        openSpeech = { speaker: lastQuoteSpeaker, convention: open };
+      } else if (open && lastQuoteSpeaker && segments.some((s) => s.kind === 'quote')) {
+        openSpeech = { speaker: lastQuoteSpeaker, convention: open };
+      } else if (!open) {
+        openSpeech = null;
       }
     }
   }
@@ -913,7 +1415,7 @@ export function attributeDialogue(text: string, knownNames: string[], hints?: At
   return units;
 }
 
-const CAPTURED_NAME_RE = /^[A-Z][a-z'’-]+(?:\s+[A-Z][a-z'’-]+)?$/;
+const CAPTURED_NAME_RE = new RegExp(`^(?:${HONORIFIC_PREFIX})?[A-Z][\\w'’-]*(?:\\s+[A-Z][\\w'’-]*){0,2}$`);
 
 // ============================================================
 // 4. The one-call pipeline
@@ -943,6 +1445,59 @@ function guessMeta(text: string, structure: 'chapters' | 'sections' | 'plain'): 
     : /[\u0900-\u097F]/.test(text.slice(0, 2000)) ? 'hi'
     : 'en';
   return { titleGuess, authorGuess, language, structure };
+}
+
+/** Title strings whose bearers must never merge with a bare surname. */
+const FEMALE_TITLES = new Set(
+  ('mrs miss ms madam madame mademoiselle lady dame mistress aunt auntie aunty grandmother grandma granny '
+   + 'grannie nana nanna sister mother nurse matron widow goodwife goody memsahib begum srimati rani maharani '
+   + 'sultana tsarina kaiserin empress queen princess duchess baroness marchioness marchioness viscountess '
+   + 'countess abbess signora senora senhora frau frau mevron mevr nonna abuela oma babushka pan pani gospozha').split(/\s+/),
+);
+
+/**
+ * Deterministic alias merge for character-name display: "Mrs. Coulter" and
+ * "Coulter" unify to the fuller form; "Miss Bingley" and "Bingley" do NOT
+ * merge. Rule: A merges into B when
+ *   - A's LAST token equals B's last token (case-insensitive), and
+ *   - one of them has no honorific and the other's honorific is not
+ *     female-coded (a bare surname may be the Mr. or the Miss — only merge
+ *     toward a male/neutral-titled or longer plain form), and
+ *   - the fuller form is at least as long.
+ * Returns normalised-lowercase alias → canonical display name.
+ */
+function buildAliasMerge(names: string[]): Map<string, string> {
+  const merge = new Map<string, string>();
+  const titleOf = (n: string): { title: string; rest: string } => {
+    const words = n.replace(/\s+/g, ' ').trim().split(/\s+/);
+    const first = words[0]?.replace(/\.$/, '').toLowerCase() ?? '';
+    if (words.length >= 2 && isHonorific(first)) return { title: first, rest: words.slice(1).join(' ') };
+    return { title: '', rest: words.join(' ') };
+  };
+  const byLast = new Map<string, string[]>();
+  for (const n of names) {
+    const words = n.replace(/\s+/g, ' ').trim().split(/\s+/);
+    if (!words.length) continue;
+    const last = words[words.length - 1].toLowerCase().replace(/[^\w'’-]/g, '');
+    if (!last) continue;
+    byLast.set(last, [...(byLast.get(last) ?? []), n]);
+  }
+  for (const [, group] of byLast) {
+    if (group.length < 2) continue;
+    // prefer the longest form as canonical; tie-break by input order (stable)
+    const sorted = [...group].sort((a, b) => b.length - a.length || group.indexOf(a) - group.indexOf(b));
+    const canonical = sorted[0];
+    const canTitle = titleOf(canonical);
+    for (const alias of sorted.slice(1)) {
+      const aTitle = titleOf(alias);
+      if (aTitle.rest.toLowerCase() !== canTitle.rest.toLowerCase()) continue;
+      if (aTitle.title && canTitle.title && aTitle.title !== canTitle.title) continue; // Mrs. vs Dr. — different people
+      if (!aTitle.title && canTitle.title && FEMALE_TITLES.has(canTitle.title)) continue; // "Bingley" ≠ "Miss Bingley"
+      if (!canTitle.title && aTitle.title && FEMALE_TITLES.has(aTitle.title)) continue;
+      merge.set(alias.toLowerCase(), canonical);
+    }
+  }
+  return merge;
 }
 
 /**
@@ -979,23 +1534,37 @@ export function buildAudiobookScript(text: string, profiles: VoiceProfileDef[], 
     : opts?.genre === 'force-nonfiction' ? { ...classifyGenre(text), kind: 'non-fiction' as const }
     : classifyGenre(text);
 
-  const names = discoverCharacterNames(speakable);
+  const descriptive = new Map<string, { gender: Gender; age?: AgeBand; group?: boolean }>();
+  const names = discoverCharacterNames(speakable, { maxNames: opts?.maxNames });
+  // Alias unification: "Coulter" and "Mrs. Coulter" are one speaker. A name
+  // merges into a fuller form when its last token matches and the title class
+  // is compatible (never across female-coded titles — "Miss Bingley" is NOT
+  // "Bingley"). The merged display keeps the fuller, more frequent form.
+  const aliasMerge = buildAliasMerge(names);
+  const resolveAlias = (n: string): string => aliasMerge.get(n.toLowerCase()) ?? n;
   // pass 1 discovers the speaking roster; pass 2 resolves pronoun tags
   // against it plus full-text genders — the two-pass trick that lets
   // "she said" resolve on the very first line of a book.
-  const pass1 = attributeDialogue(speakable, names);
+  const pass1 = attributeDialogue(speakable, names, { descriptiveOut: descriptive });
+  for (const u of pass1) {
+    if (u.kind === 'dialogue' && u.speaker !== 'Narrator') u.speaker = resolveAlias(u.speaker);
+  }
   const roster = [...new Set(pass1.filter((u) => u.kind === 'dialogue' && u.speaker !== 'Narrator').map((u) => u.speaker))];
   const snippetSource = speakable
     .split(/\n{2,}/)
     // narration-only contexts: quoted dialogue is blanked out at its exact
     // offsets (a vocative like "How old is the lens, Tomas?" is not narration
     // about Tomas — and must not leak Pip's "ten years old" into his zone)
-    .map((p) => p.replace(/“[^”\n]*”|"[^"\n]*"/g, (m) => ' '.repeat(m.length)));
+    .map((p) => p.replace(/“[^”\n]*”|"[^"\n]*"/g, (m) => ' '.repeat(m.length)))
+    .map((p) => p.replace(/‘[^’\n]*’|«[^»\n]*»/g, (m) => ' '.repeat(m.length)));
   const genders: Record<string, Gender> = {};
   for (const n of [...roster, ...names]) {
     if (!(n in genders)) genders[n] = inferCharacterMeta(n, snippetSource.filter((p) => p.includes(n)).slice(0, 6)).gender;
   }
-  let units = attributeDialogue(speakable, names, { roster, genders });
+  let units = attributeDialogue(speakable, names, { roster, genders, descriptiveOut: descriptive });
+  for (const u of units) {
+    if (u.kind === 'dialogue' && u.speaker !== 'Narrator') u.speaker = resolveAlias(u.speaker);
+  }
 
   // Non-fiction: every line is the Narrator's — quotes stay inline narration.
   if (verdict.kind === 'non-fiction') {
@@ -1031,7 +1600,11 @@ export function buildAudiobookScript(text: string, profiles: VoiceProfileDef[], 
     if (u.kind === 'dialogue' && u.speaker !== 'Narrator') quoteCounts.set(u.speaker, (quoteCounts.get(u.speaker) ?? 0) + 1);
   }
   const ranked = [...quoteCounts.entries()].sort((a, b) => b[1] - a[1]);
-  const maxCast = Math.max(1, opts?.maxCast ?? 8);
+  // Every character keeps a voice by default — the formant engine
+  // differentiates reused profiles by rate/pitch so casts far larger than the
+  // profile catalog still sound distinct. The cap is only a user-facing
+  // guardrail (maxCast option / UI slider) for absurdly large rosters.
+  const maxCast = Math.max(1, opts?.maxCast ?? 48);
   const featured = ranked.slice(0, maxCast).map(([name]) => name);
   const folded = ranked.slice(maxCast).map(([name]) => name);
   // minor speakers beyond the cap read as the Narrator
@@ -1059,7 +1632,11 @@ export function buildAudiobookScript(text: string, profiles: VoiceProfileDef[], 
   for (const name of featured) {
     const quotes = quoteCounts.get(name) ?? 0;
     const contexts = snippetSource.filter((p) => p.includes(name)).slice(0, 6);
-    const meta = inferCharacterMeta(name, contexts);
+    const descr = descriptive.get(name);
+    const baseMeta = inferCharacterMeta(name, contexts);
+    const meta: CharacterMeta = descr
+      ? { ...baseMeta, gender: descr.gender, ageBand: descr.age ?? baseMeta.ageBand, group: descr.group }
+      : baseMeta;
     const role: CharacterMeta['role'] = quotes >= 3 || (quotes >= 2 && featured.length <= 4) ? 'major' : 'minor';
     const assignment: CastAssignment = castVoiceFor(withRole(meta, role), profiles, taken);
     cast.push({ name, meta: withRole(meta, role), ...assignment });

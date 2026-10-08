@@ -192,6 +192,10 @@ async function verifyChunk(
     '  - Gendered pronouns: if "she said" follows a quote, the speaker is the most recent female character mentioned in the preceding lines.',
     '  - Vocative names inside quotes: "Eleanor, come here" → the OTHER person is speaking.',
     '  - Interruptions: "—But I—" "Quiet!" → track who was interrupted from the surrounding exchange.',
+    '  - Headless responses: "No," came the reply / was the answer → the OTHER participant in the exchange.',
+    '  - Group speakers: "cried the soldiers" → the group ("The Soldiers") speaks, not one named character.',
+    '  - Letter/diary conventions: a quote inside a letter signed "Yours sincerely, Eleanor" belongs to Eleanor.',
+    '  - Continued speech: a paragraph without quote marks that continues an open quote keeps the SAME speaker.',
     '  - If the speaker name is an ordinary word or placeholder (e.g. "It", "Well", "Monday", "The Boy"), correct it to the real character name or Narrator.',
     'Return ONLY valid JSON.',
     'Shape: {"verifications":[{"id":"u0","speaker":"Narrator","corrected":false,"emotion":"soft","reasoning":"..."}],"newCharacters":[{"name":"...","gender":"male|female|neutral","age":"child|young|adult|middle|elder","description":"...","evidence":["..."]}],"notes":["..."]}.',
@@ -304,7 +308,9 @@ async function aiResolveSpeakers(
       'CRITICAL: Never judge a line from the line alone. Reconstruct the conversation from the PREVIOUS LINES and COMING LINES: track turns (who spoke last and who would reply), dialogue tags, pronouns, and action beats touching each quote.',
       '  - In a two-person exchange, untagged quotes ALTERNATE between the two speakers unless a tag says otherwise.',
       '  - A quote right after a tag sandwich ("…", she said. "…") usually continues the SAME speaker; a rebuttal opener ("But …", "Why …", "How …") starts the OTHER speaker\'s turn.',
-      '  - "she thought" / "he wondered" mark internal monologue — keep those as Narrator.',
+      '  - "she thought" / "he wondered" mark internal monologue — keep those as Narrator. But a follow-up quote that ADDRESSES someone ("You forget who taught you.") after a thought is SPOKEN.',
+      '  - "No," came the reply / was the answer → the OTHER participant. "cried the soldiers" → "The Soldiers".',
+      '  - A quote inside a letter signed with a name belongs to that signer.',
       '  - Use a name from KNOWN CHARACTERS whenever the evidence points to them. For a clearly characterised but unnamed speaker use "The <Role>" (e.g. "The Other Girl", "The Innkeeper"). Answer "Narrator" only when the line is genuinely not character speech.',
       'Return ONLY valid JSON: {"resolutions":[{"id":"u0","speaker":"Name","confidence":"high|medium|low","reasoning":"one sentence"}]} — exactly one entry per TARGET id.',
       `KNOWN CHARACTERS: ${JSON.stringify(roster)}`,
@@ -411,6 +417,78 @@ async function aiValidateCharacters(
   return all;
 }
 
+// ---------- AI character census ----------
+// Deep-mode pass: walk the WHOLE book in windows and list EVERY character the
+// model can find — speaking or silent, named or role-based — so large casts
+// are never bounded by what the rule engine happened to catch in a tag.
+
+export interface CensusEntry {
+  name: string;
+  speaks: boolean;
+  gender: 'male' | 'female' | 'neutral';
+  ageBand: 'child' | 'young' | 'adult' | 'middle' | 'elder' | 'unknown';
+  description: string;
+  evidence: string[];
+}
+
+interface CensusBatch {
+  characters: CensusEntry[];
+}
+
+async function aiCharacterCensus(
+  generator: any,
+  text: string,
+  knownNames: string[],
+  control?: PipelineControl,
+  onBatch?: (done: number, total: number) => void,
+): Promise<CensusEntry[]> {
+  const entries: CensusEntry[] = [];
+  const seen = new Set<string>();
+  const windowLen = Math.min(6000, Math.max(2500, Math.floor(text.length / 6)));
+  const windows: string[] = [];
+  for (let i = 0; i < text.length && windows.length < 8; i += windowLen) {
+    windows.push(text.slice(i, i + windowLen));
+  }
+  for (let wi = 0; wi < windows.length; wi++) {
+    await control?.waitWhilePaused?.();
+    if (control?.shouldCancel?.()) break;
+    const prompt = [
+      'You are a literary analyst building a COMPLETE character census of a novel.',
+      'List EVERY character that appears in this excerpt: characters who speak, characters who only act, named characters, and recurring unnamed figures ("the innkeeper", "the old nurse").',
+      'Include minor and background characters — the census must not be bounded by a fixed number.',
+      'Do NOT list places, dates, objects, chapter titles, or ordinary words that merely appear capitalized.',
+      'Return ONLY valid JSON:',
+      '{"characters":[{"name":"...","speaks":true,"gender":"male|female|neutral","ageBand":"child|young|adult|middle|elder|unknown","description":"one line","evidence":["short quote or action"]}]}',
+      `ALREADY KNOWN (skip duplicates): ${JSON.stringify(knownNames.slice(0, 60))}`,
+      `EXCERPT ${wi + 1}/${windows.length}:`,
+      windows[wi].slice(0, 3000),
+    ].join('\n');
+    try {
+      const raw = await generator(prompt, { max_new_tokens: 1100, do_sample: false, return_full_text: false });
+      const out = extractJson(raw) as CensusBatch | null;
+      if (out && Array.isArray(out.characters)) {
+        for (const c of out.characters) {
+          if (typeof c?.name !== 'string' || !c.name.trim()) continue;
+          const name = c.name.trim();
+          const key = name.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          entries.push({
+            name,
+            speaks: Boolean(c.speaks),
+            gender: (['male', 'female', 'neutral'].includes(c.gender) ? c.gender : 'neutral') as CensusEntry['gender'],
+            ageBand: (['child', 'young', 'adult', 'middle', 'elder', 'unknown'].includes(c.ageBand) ? c.ageBand : 'unknown') as CensusEntry['ageBand'],
+            description: typeof c.description === 'string' ? c.description.slice(0, 200) : '',
+            evidence: Array.isArray(c.evidence) ? c.evidence.filter((e: unknown): e is string => typeof e === 'string').slice(0, 3) : [],
+          });
+        }
+      }
+    } catch { /* window failed — the census continues with the next */ }
+    onBatch?.(wi + 1, windows.length);
+  }
+  return entries;
+}
+
 // ---------- Full-cast AI builder ----------
 
 interface AiCastMember {
@@ -504,18 +582,24 @@ async function aiAssignVoice(
   generator: any,
   character: AiCastMember,
   availableProfiles: { id: string; name: string; description: string; gender: string }[],
+  usedProfileIds: string[] = [],
 ): Promise<AiVoiceAssignment> {
   const prompt = [
     'You are a voice casting director. Choose the best voice profile for this character.',
+    'Prefer a profile NOT in VOICES ALREADY IN USE so every character sounds distinct; only reuse one when the voice description strongly matches, and shape rate/pitch to differentiate.',
+    'Shape the delivery with rate (0.8..1.2) and pitch (0.85..1.3) to fit the character\'s age, size and temperament.',
     'Return ONLY valid JSON: {"profileId":"...","rate":0.8..1.2,"pitch":0.85..1.3,"rationale":"..."}.',
     `CHARACTER: ${JSON.stringify({ name: character.name, voiceDescription: character.voiceDescription, gender: character.gender, age: character.ageBand, personality: character.personalityTraits.join(', ') })}`,
     `AVAILABLE PROFILES: ${JSON.stringify(availableProfiles)}`,
+    `VOICES ALREADY IN USE: ${JSON.stringify(usedProfileIds)}`,
   ].join('\n');
 
   try {
     const raw = await generator(prompt, { max_new_tokens: 250, do_sample: false, return_full_text: false });
     const out = extractJson(raw) as Record<string, any> | null;
     if (!out || typeof out !== 'object' || typeof out.profileId !== 'string') throw new Error('No assignment');
+    // the model must choose a REAL profile id — anything else falls back to rules
+    if (!availableProfiles.some((p) => p.id === out.profileId)) throw new Error('Unknown profile');
     return {
       profileId: out.profileId,
       rate: Math.max(0.8, Math.min(1.2, Number(out.rate) || 1.0)),
@@ -788,6 +872,8 @@ interface AutobookCheckpointState {
   verdicts?: AiCharacterVerdict[];
   /** STEP 3b cast result (once computed). */
   aiCast?: AiCastResult;
+  /** STEP 3c character census (deep mode only, once computed). */
+  census?: CensusEntry[];
   /** STEP 4 assignments keyed by normalised character name. */
   voiceAssignments?: Record<string, AiVoiceAssignment>;
   /** STEP 5 loop position. */
@@ -1119,6 +1205,44 @@ export async function buildAudiobookScriptWithAI(
     }, 0.63);
   }
 
+  // STEP 3c (deep): AI character CENSUS — every character in the book,
+  // speaking or silent, so the cast is never bounded by rule-caught tags.
+  let census = cp?.census ?? null;
+  if (deep && !cancelledMidPipeline && !census) {
+    onProgress?.(0.655, 'AI: taking the full character census…');
+    try {
+      const rosterForCensus = [...new Set([
+        ...(draft.cast ?? []).filter((c) => c.name !== 'Narrator').map((c) => c.name),
+        ...allNewCharacters.map((c) => c.name),
+      ])];
+      census = await aiCharacterCensus(generator, text, rosterForCensus, control,
+        (done, total) => onProgress?.(0.655 + (done / Math.max(1, total)) * 0.02, `AI: character census window ${done}/${total}`));
+      if (control?.shouldCancel?.()) cancelledMidPipeline = true;
+      // speaking characters the census found join the cast pipeline
+      for (const entry of census) {
+        if (!entry.speaks) continue;
+        const key = normaliseName(entry.name);
+        if (rejectedNames.has(key)) continue;
+        if (!allNewCharacters.some((c) => normaliseName(c.name) === key)) {
+          allNewCharacters.push({
+            name: entry.name, gender: entry.gender, ageBand: entry.ageBand, role: 'minor',
+            physicalDescription: entry.description, personalityTraits: [], voiceDescription: '',
+            evidence: entry.evidence, quoteCount: 0,
+          });
+        }
+      }
+    } catch (e: any) {
+      onProgress?.(0.66, `AI census skipped (${e?.message || 'error'}) — rule-discovered roster stands`);
+    }
+    await persist('cast', {
+      stage: 'cast', globalAi, verifyNextChunk: totalChunks,
+      verifications: Object.fromEntries(allVerifications), coveredIds: [...coveredIds],
+      newCharacters: allNewCharacters, chunkNotes, failedChunks,
+      unitsSnapshot: units, verdicts, census: census ?? undefined,
+    }, 0.66);
+  }
+  const censusCount = census?.length ?? 0;
+
   // STEP 3b: AI builds complete cast from full-text evidence (validated names only)
   onProgress?.(0.63, 'AI: building cast from full-text evidence…');
   let aiCast: AiCastResult = cp?.aiCast ?? { cast: [], narratorStyle: '', notes: [] };
@@ -1195,7 +1319,7 @@ export async function buildAudiobookScriptWithAI(
     const voiceFromAi = !voice;
     if (!voice) {
       try {
-        voice = await aiAssignVoice(generator, character, availableProfiles);
+        voice = await aiAssignVoice(generator, character, availableProfiles, [...assigned]);
       } catch {
         const meta = inferCharacterMeta(character.name, []);
         const fallback = castVoiceFor(
@@ -1364,6 +1488,7 @@ export async function buildAudiobookScriptWithAI(
     ...(cancelledMidPipeline ? ['Cancelled mid-pipeline — partial AI enhancements applied.'] : []),
     `AI validated ${aiApproved.size} character names; rejected ${rejectedNames.size} non-characters${rejectedNames.size ? ` (${[...rejectedNames].slice(0, 5).join(', ')}${rejectedNames.size > 5 ? '…' : ''})` : ''}.`,
     `AI built cast of ${castMembers.length - 1} characters from full-text evidence.`,
+    ...(censusCount ? [`AI character census: ${censusCount} character(s) catalogued across the whole book (speaking and silent).`] : []),
     `AI assigned voices based on character voice descriptions.`,
     ...(globalAi?.notes ?? []),
     ...(aiCast.notes ?? []),

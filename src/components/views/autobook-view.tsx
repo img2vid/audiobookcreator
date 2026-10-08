@@ -354,7 +354,7 @@ export function AutoBookView() {
   const [localAiStatus, setLocalAiStatus] = useState<LocalAiStatus | null>(null);
   const renderTimingsRef = useRef<RenderTiming[]>([]);
 
-  const [maxCast, setMaxCast] = useState(8);
+  const [maxCast, setMaxCast] = useState(48);
   const [genreMode, setGenreMode] = useState<'auto' | 'force-fiction' | 'force-nonfiction'>('auto');
 
   // cast overrides keyed by speaker name
