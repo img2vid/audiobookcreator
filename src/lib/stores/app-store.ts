@@ -49,8 +49,6 @@ export interface AppSettings {
   /** Master switch for AI model downloads. When false, no model is ever
    *  fetched at runtime; AI runs only from files bundled under /models. */
   aiAllowRemoteDownload: boolean;
-   aiDepth: 'light' | 'standard' | 'deep';
-
   aiDepth: 'light' | 'standard' | 'deep';
   aiAssistOcr: boolean;
   aiAssistTranscript: boolean;
