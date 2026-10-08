@@ -266,6 +266,13 @@ export function SettingsView() {
             <Label htmlFor="ai-assist">Enable AI assistance everywhere</Label>
             <Switch id="ai-assist" checked={settings.aiAssist} onCheckedChange={(v) => setSetting('aiAssist', v as never)} />
           </div>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Label htmlFor="ai-download">Allow AI model downloads</Label>
+              <FieldTip text="If the selected model is not bundled with the app, it is downloaded once from its Hugging Face repository and cached in this browser (~120 MB – 2.4 GB). Turn this off to guarantee zero AI network traffic — AI then runs only from bundled model files, otherwise AutoBook uses its deterministic engine." />
+            </div>
+            <Switch id="ai-download" disabled={!settings.aiAssist} checked={settings.aiAllowRemoteDownload} onCheckedChange={(v) => setSetting('aiAllowRemoteDownload', v as never)} />
+          </div>
           <Separator />
           <div className="flex items-center gap-3">
             <Label>AI depth</Label>

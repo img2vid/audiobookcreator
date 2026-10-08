@@ -12,7 +12,7 @@
 // the first one present on disk.
 
 export type LocalAiTier = 'fast' | 'balanced' | 'advanced';
-export type LocalAiDtype = 'q4f16' | 'q4' | 'q8' | 'fp16' | 'fp32';
+export type LocalAiDtype = 'q4f16' | 'q4' | 'q8' | 'int8' | 'uint8' | 'fp16' | 'fp32';
 
 export interface LocalAiModelDef {
   id: string;
@@ -41,7 +41,10 @@ export const LOCAL_AI_MODELS: LocalAiModelDef[] = [
     source: 'onnx-community/SmolLM2-360M-Instruct-ONNX',
     sizeMB: 272,
     dtype: 'q4f16',
-    dtypes: ['q4f16'],
+    // q4f16 first (best quality), but always offer CPU-safe fallbacks —
+    // fp16 compute is unsupported by onnxruntime-web WASM on many machines,
+    // and without these the loader gave up and AutoBook silently fell back.
+    dtypes: ['q4f16', 'q4', 'int8', 'fp16'],
     weights: 'model_q4f16.onnx',
     tier: 'balanced',
     description: 'Recommended local director: small enough for GitHub-hosted apps while still useful for genre, dialogue and casting decisions.',

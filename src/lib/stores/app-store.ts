@@ -46,6 +46,11 @@ export interface AppSettings {
   reducedMotion: boolean;
   // AI assistance settings
   aiAssist: boolean;
+  /** Master switch for AI model downloads. When false, no model is ever
+   *  fetched at runtime; AI runs only from files bundled under /models. */
+  aiAllowRemoteDownload: boolean;
+   aiDepth: 'light' | 'standard' | 'deep';
+
   aiDepth: 'light' | 'standard' | 'deep';
   aiAssistOcr: boolean;
   aiAssistTranscript: boolean;
@@ -162,7 +167,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoTune: true,
   ocrPowerOverride: 'auto',
   preferredModelId: '',
-  localAiModelId: 'smollm2-135m-instruct',
+  // The 360m model is the tier whose companion files actually ship in
+  // public/, and it is the registry's recommended model.
+  localAiModelId: 'smollm2-360m-instruct',
   preferredVoiceURI: '',
   outputFormat: 'wav-16',
   sampleRate: 44100,
@@ -173,6 +180,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   highContrast: false,
   reducedMotion: false,
   aiAssist: true,
+  aiAllowRemoteDownload: true,
   aiDepth: 'light',
   aiAssistOcr: true,
   aiAssistTranscript: true,

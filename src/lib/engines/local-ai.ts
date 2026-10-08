@@ -9,6 +9,13 @@
 // repository and cached by the browser. This applies to every entry in
 // LOCAL_AI_MODELS — the runtime reads `model.source`, so selecting any listed
 // model downloads that model; it is not limited to the default SmolLM2 model.
+//
+// Runtime download is controlled by the app settings:
+//   - aiAssist=false            → AI is disabled: nothing loads, nothing downloads.
+//   - aiAllowRemoteDownload=false → only locally-bundled weights may be used;
+//                                 a missing model throws AiDownloadDisabledError
+//                                 instead of hitting the network.
+//
 // This module is intentionally browser-only.
 //
 // v2: general-purpose AI runtime. Every module in the studio calls
@@ -111,6 +118,63 @@ export interface AiTaskOutcome<T> {
   error?: string;
 }
 
+// ---------- App-wide AI policy (read at call time, never cached) ----------
+
+/** Thrown when the user has disabled AI assistance — callers must not treat
+ *  this as a failure; it is an intentional configuration. No network request
+ *  has been made and no model has been loaded when this is thrown. */
+export class AiDisabledError extends Error {
+  constructor() {
+    super('AI assistance is disabled in Settings — no model was loaded and nothing was downloaded.');
+    this.name = 'AiDisabledError';
+  }
+}
+
+/** Thrown when model weights are missing locally and the user has blocked
+ *  runtime downloads. Actionable: bundle the files or enable downloads. */
+export class AiDownloadDisabledError extends Error {
+  constructor(modelName: string) {
+    super(
+      `${modelName} is not installed and AI model downloads are disabled. ` +
+      'Bundle the model files under public/models/autobook-ai/ (npm run fetch:model && npm run build) ' +
+      'or enable downloads in Settings → AI assistance.',
+    );
+    this.name = 'AiDownloadDisabledError';
+  }
+}
+
+/** Read the effective AI policy from the app store at call time. Resolved via
+ *  dynamic import so this module never forms a static import cycle with the
+ *  store (the store also imports engines that use this runtime). */
+async function aiPolicy(): Promise<{ enabled: boolean; allowRemoteDownload: boolean }> {
+  try {
+    const { useAppStore } = await import('@/lib/stores/app-store');
+    const s = useAppStore.getState().settings;
+    return { enabled: s.aiAssist !== false, allowRemoteDownload: s.aiAllowRemoteDownload !== false };
+  } catch {
+    // Store unavailable (e.g. unusual SSR/test context) — stay permissive.
+    return { enabled: true, allowRemoteDownload: true };
+  }
+}
+
+/**
+ * Explicitly download (or load) a model NOW, with progress — used by the
+ * "Download model" button so the large one-time fetch happens on user command
+ * instead of in the middle of the first analysis. Throws on failure.
+ */
+export async function warmLocalAiModel(modelId?: string, onProgress?: Progress): Promise<LocalAiStatus> {
+  const model = getLocalAiModel(modelId ?? DEFAULT_LOCAL_AI_MODEL_ID);
+  onProgress?.(0, `Preparing ${model.label}…`);
+  await createGenerator(model, { onProgress });
+  return getLocalAIStatus(model.id);
+}
+
+/** Forget a previously downloaded remote copy so the next use re-downloads it. */
+export async function clearLocalAiCache(modelId?: string): Promise<void> {
+  const model = getLocalAiModel(modelId ?? DEFAULT_LOCAL_AI_MODEL_ID);
+  await purgeRemoteModelCache(model.source);
+}
+
 const cache = new Map<string, Promise<unknown>>();
 
 function modelBasePath(model: LocalAiModelDef): string {
@@ -138,7 +202,8 @@ export async function getLocalAIStatus(modelId = DEFAULT_LOCAL_AI_MODEL_ID): Pro
   const base = modelBasePath(model);
   try {
     // Probe the model's primary config and weight files. If they are absent the
-    // generator will use the registry `source` for a one-time remote download.
+    // generator will use the registry `source` for a one-time remote download
+    // (unless downloads are disabled in Settings).
     const config = await fetch(`${base}config.json`, { cache: 'no-store' });
     if (!config.ok) {
       return {
@@ -261,11 +326,17 @@ export async function createGenerator(
     const transformers = await import('@huggingface/transformers');
     const { env, pipeline } = transformers as any;
 
+    // Policy gate BEFORE any network activity: AI off → never load/download;
+    // downloads disabled → only locally-bundled weights may be used.
+    const policy = await aiPolicy();
+    if (!policy.enabled) throw new AiDisabledError();
+
     // Local-first, remote fallback for any registered model. `model.source` is
     // the model-specific Hugging Face repository, so every LOCAL_AI_MODELS
     // entry can download independently when selected.
     const status = await getLocalAIStatus(model.id).catch(() => null);
     const useRemote = !status?.ready;
+    if (useRemote && !policy.allowRemoteDownload) throw new AiDownloadDisabledError(model.label);
     const modelRef = useRemote ? model.source : model.folder;
 
     env.allowRemoteModels = useRemote;
@@ -308,6 +379,9 @@ export async function createGenerator(
 
     // dtype fallback chain — try the declared dtype first, then any other
     // variant the build pipeline may have produced, on the best device.
+    // The registry lists CPU-safe fallbacks (q4, int8) after q4f16 because
+    // fp16 compute is unsupported by onnxruntime-web WASM on many machines;
+    // without them the loader gave up and AutoBook silently fell back.
     const device = webgpuOk ? 'webgpu' : 'wasm';
     const dtypesToTry = [model.dtype, ...(model.dtypes ?? []).filter((d) => d !== model.dtype)];
     const configByDevice = new Map<LocalAiDevice, Promise<any>>();
@@ -648,7 +722,7 @@ async function deepCharacterAnalysisPass(
   try {
     const raw = await askJson(generator, [
       'You are a literary character analyst. From the text excerpts, analyze each character thoroughly.',
-      'For each character determine: gender, age band (child/young/adult/middle/elder/unknown), physical description, personality traits, and relationships to other characters.',
+      'For each character determine: gender, age band, physical description, personality traits, and relationships to other characters.',
       'Also map relationships between characters: who is related to whom, who is friends/enemies, power dynamics.',
       'Return ONLY valid JSON: {"characters":[{"name":"...","gender":"male|female|neutral","ageBand":"...","physicalDescription":"...","personalityTraits":["..."],"relationships":[{"character":"...","relation":"..."}]}],"relationships":[{"from":"...","to":"...","relation":"..."}]}',
       `EXISTING NAMES: ${JSON.stringify(baselineNames)}`,
@@ -833,8 +907,8 @@ export async function analyzeWithLocalAI(
   onProgress?.(0.97, 'AI director: applying confidence-checked decisions…');
   const notes: string[] = [
     status.ready
-      ? `Used ${model.label} locally with remote model loading disabled.`
-      : `Used ${model.label} via a one-time download from ${model.source}; it is now cached in this browser.`,
+      ? `Used ${model.label} from model files bundled with the app.`
+      : `Used ${model.label} via a one-time download (~${model.sizeMB} MB) from ${model.source}; it is now cached in this browser.`,
     `AI reviewed ${decisions.length} dialogue lines; deterministic attribution remains the fallback for the rest.`,
   ];
   if (options?.deep) {

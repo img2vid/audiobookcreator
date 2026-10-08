@@ -387,6 +387,9 @@ export function AutoBookView() {
   const [producing, setProducing] = useState<'audio' | 'video' | null>(null);
   const [producingProgress, setProducingProgress] = useState(0);
 
+  // explicit model download/remove operation (progress + phase)
+  const [modelOp, setModelOp] = useState<{ phase: 'download' | 'clear'; p: number } | null>(null);
+
   const profiles = useMemo(() => allVoiceProfiles(), [customProfiles]);
   const localAiModels = useMemo(() => getLocalAiModelOptions(), []);
 
@@ -395,6 +398,38 @@ export function AutoBookView() {
     getLocalAIStatus(settings.localAiModelId).then((status) => { if (!cancelled) setLocalAiStatus(status); });
     return () => { cancelled = true; };
   }, [settings.localAiModelId]);
+
+  const refreshAiStatus = useCallback(() => {
+    getLocalAIStatus(settings.localAiModelId).then(setLocalAiStatus);
+  }, [settings.localAiModelId]);
+
+  const downloadModel = useCallback(async () => {
+    if (modelOp) return;
+    setModelOp({ phase: 'download', p: 0 });
+    try {
+      const { warmLocalAiModel } = await import('@/lib/engines/local-ai');
+      const status = await warmLocalAiModel(settings.localAiModelId, (p) => setModelOp({ phase: 'download', p }));
+      toast({ title: 'AI model ready', description: `${status.modelName} is downloaded — analysis will use it.` });
+    } catch (e: any) {
+      toast({ title: 'Model download failed', description: e?.message ?? 'unknown error', variant: 'destructive' });
+    } finally {
+      setModelOp(null);
+      refreshAiStatus();
+    }
+  }, [modelOp, settings.localAiModelId, refreshAiStatus, toast]);
+
+  const clearModel = useCallback(async () => {
+    if (modelOp) return;
+    setModelOp({ phase: 'clear', p: 0 });
+    try {
+      const { clearLocalAiCache } = await import('@/lib/engines/local-ai');
+      await clearLocalAiCache(settings.localAiModelId);
+      toast({ title: 'Cached model cleared', description: 'The next analysis will download it again.' });
+    } finally {
+      setModelOp(null);
+      refreshAiStatus();
+    }
+  }, [modelOp, settings.localAiModelId, refreshAiStatus, toast]);
 
   // ---------- derived ----------
   const effectiveUnits = useMemo(() => {
@@ -1007,16 +1042,58 @@ export function AutoBookView() {
             <div className="flex items-center gap-2">
               <WandSparkles className="h-3.5 w-3.5 text-violet-500" />
               <p className="text-xs font-semibold">Local AI director</p>
-              <Badge variant="outline" className={cn('h-5 gap-1 text-[10px]', localAiStatus?.ready ? 'border-emerald-500/40 text-emerald-600' : 'text-muted-foreground')}>
-                <span className={cn('h-1.5 w-1.5 rounded-full', localAiStatus?.ready ? 'bg-emerald-500' : 'bg-muted-foreground/50')} />
-                {localAiStatus?.ready ? 'Ready' : 'Model not installed'}
+              <Badge variant="outline" className={cn('h-5 gap-1 text-[10px]',
+                !settings.aiAssist ? 'text-muted-foreground'
+                : localAiStatus?.ready ? 'border-emerald-500/40 text-emerald-600'
+                : !settings.aiAllowRemoteDownload ? 'border-amber-500/40 text-amber-600'
+                : 'text-muted-foreground')}>
+                <span className={cn('h-1.5 w-1.5 rounded-full',
+                  !settings.aiAssist ? 'bg-muted-foreground/50'
+                  : localAiStatus?.ready ? 'bg-emerald-500'
+                  : !settings.aiAllowRemoteDownload ? 'bg-amber-500' : 'bg-muted-foreground/50')} />
+                {!settings.aiAssist ? 'AI disabled'
+                  : localAiStatus?.ready ? 'Ready'
+                  : !settings.aiAllowRemoteDownload ? 'Downloads disabled'
+                  : 'Will download on first use'}
               </Badge>
             </div>
             <p className="mt-1 text-[10px] leading-snug text-muted-foreground">
-              {localAiStatus?.ready ? `${localAiStatus.modelName} · ~${localAiStatus.sizeMB} MB · remote model loading disabled` : 'Add the model files listed in docs/LOCAL_AI_MODELS.md. AutoBook will otherwise use its explainable local fallback.'}
+              {!settings.aiAssist
+                ? 'AI is turned off in Settings — AutoBook will use its deterministic engine and will not download anything.'
+                : localAiStatus?.ready
+                  ? `${localAiStatus.modelName} · ~${localAiStatus.sizeMB} MB · runs entirely in this browser.`
+                  : !settings.aiAllowRemoteDownload
+                    ? 'Model is not bundled and downloads are blocked — the deterministic fallback will be used. Run "npm run fetch:model && npm run build", or enable downloads in Settings.'
+                    : `${localAiStatus?.modelName ?? 'Model'} (~${localAiStatus?.sizeMB ?? '?'} MB) is downloaded once on first analysis, then cached in this browser.`}
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {!localAiStatus?.ready && settings.aiAssist && (
+              <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 gap-1.5 text-xs"
+                  onClick={downloadModel}
+                  disabled={!!modelOp || !settings.aiAllowRemoteDownload}
+                  title={settings.aiAllowRemoteDownload ? 'Download the selected model now' : 'Downloads are disabled in Settings'}
+                >
+                  {modelOp?.phase === 'download'
+                    ? <><Loader2 className="h-3 w-3 animate-spin" />{Math.round(modelOp.p * 100)}%</>
+                    : <><Download className="h-3 w-3" />Download model</>}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 gap-1 text-xs text-muted-foreground"
+                  onClick={clearModel}
+                  disabled={!!modelOp || !settings.aiAllowRemoteDownload}
+                  title="Forget the cached copy and re-download next time"
+                >
+                  <RefreshCcw className="h-3 w-3" />
+                </Button>
+              </>
+            )}
             <Label className="sr-only">Local AI model</Label>
             <Select value={settings.localAiModelId} onValueChange={(v) => useAppStore.getState().setSetting('localAiModelId', v)}>
               <SelectTrigger className="h-8 w-56 text-xs" aria-label="Local AI model"><SelectValue /></SelectTrigger>

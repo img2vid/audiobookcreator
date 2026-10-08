@@ -21,7 +21,9 @@
 // Every AI call is optional-enhancement: if the model is missing or cannot
 // load, the rule-based draft is returned unchanged. When remote fallback is
 // enabled in local-ai.ts, a missing model is downloaded from its own Hugging
-// Face repository before inference starts.
+// Face repository before inference starts. When the user disables AI
+// assistance (or AI model downloads) in Settings, this module never touches
+// the network and returns the deterministic draft with an explanatory note.
 // ============================================================
 
 import { buildAudiobookScript, type AutobookOptions, type AutobookResult, type ScriptUnit, type BookCastMember, type AutobookStats } from '@/lib/engines/autobook';
@@ -805,12 +807,32 @@ export async function buildAudiobookScriptWithAI(
   const draft = buildAudiobookScript(text, profiles, opts);
   if (!text.trim() || draft.units.length === 0) return draft;
 
+  // AI assistance master switch: when off, never touch the network and never
+  // load a model — the deterministic engine IS the answer by configuration.
+  if (!useAppStore.getState().settings.aiAssist) {
+    onProgress?.(1, 'AI assistance is disabled in Settings — deterministic AutoBook only.');
+    return {
+      ...draft,
+      ai: {
+        enabled: false,
+        modelId: opts?.modelId ?? useAppStore.getState().settings.localAiModelId,
+        modelName: 'Deterministic AutoBook (AI disabled)',
+        reviewedDialogue: 0, totalUnits: 0, coverage: 0,
+        notes: [
+          'AI assistance is disabled in Settings. No model was loaded and nothing was downloaded.',
+          'Enable it in Settings → AI assistance to get the local AI director back.',
+        ],
+      },
+    };
+  }
+
   const deep = useAppStore.getState().settings.aiAssist && useAppStore.getState().settings.aiDepth !== 'light';
   const modelId = opts?.modelId ?? useAppStore.getState().settings.localAiModelId;
 
   // Check AI availability. A missing local model is not an immediate fallback:
   // createGenerator() uses the model registry's Hugging Face source for a
-  // one-time browser download, then runs inference locally from its cache.
+  // one-time browser download (unless downloads are disabled in Settings),
+  // then runs inference locally from its cache.
   const { getLocalAIStatus, createGenerator } = await import('@/lib/engines/local-ai');
   const { getLocalAiModel } = await import('@/lib/data/local-ai-models');
   const status = await getLocalAIStatus(modelId);
@@ -837,13 +859,19 @@ export async function buildAudiobookScriptWithAI(
       onProgress: (p, message) => onProgress?.(0.08 + p * 0.06, message),
     });
   } catch (err: any) {
-    onProgress?.(1, `Model failed to load (${err?.message || 'unknown'}) — using rule-based draft`);
+    // AiDisabledError / AiDownloadDisabledError are intentional configuration,
+    // not failures — surface the exact reason instead of a generic failure note.
+    const intentional = err?.name === 'AiDisabledError' || err?.name === 'AiDownloadDisabledError';
+    onProgress?.(1, intentional ? `${err?.message}` : `Model failed to load (${err?.message || 'unknown'}) — using rule-based draft`);
     return {
       ...draft,
       ai: {
-        enabled: false, modelId, modelName: 'Rule-based draft (model load failed)',
+        enabled: false, modelId,
+        modelName: intentional ? 'Deterministic AutoBook' : 'Rule-based draft (model load failed)',
         reviewedDialogue: 0, totalUnits: 0, coverage: 0,
-        notes: [`AI model could not load: ${err?.message || 'unknown'}`, 'Rule-based AutoBook produced this draft instead.'],
+        notes: intentional
+          ? [String(err?.message ?? '')]
+          : [`AI model could not load: ${err?.message || 'unknown'}`, 'Rule-based AutoBook produced this draft instead.'],
       },
     };
   }
@@ -1328,7 +1356,9 @@ export async function buildAudiobookScriptWithAI(
 
   const notes: string[] = [
     ...(resumedFromCheckpoint ? [`Resumed from a saved checkpoint (stage: ${resumeStage}) — no completed work was re-done.`] : []),
-    `Used ${status.modelName} locally with remote model loading disabled.`,
+    status.ready
+      ? `Used ${status.modelName} from bundled model files.`
+      : `Used ${status.modelName} via a one-time download (~${status.sizeMB} MB), now cached in this browser.`,
     `AI reviewed ${coveredIds.size}/${totalUnits} lines (${Math.round(aiCoverage * 100)}% coverage) across ${totalChunks} chunks${failedChunks ? ` (${failedChunks} chunks failed and were skipped)` : ''} — every line judged with its previous and coming lines as context.`,
     `AI speaker resolution: ${unresolvedIdx.length} ambiguous quote(s) re-examined against their surrounding conversation; ${speakersResolved} given a real character voice.`,
     ...(cancelledMidPipeline ? ['Cancelled mid-pipeline — partial AI enhancements applied.'] : []),
