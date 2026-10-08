@@ -419,6 +419,7 @@ export async function createGenerator(
         try {
           return await pipeline('text-generation', modelRef, await loadOptions(dtype, device));
         } catch (e) {
+          console.error(`[local-ai] attempt failed: dtype=${dtype} device=${device}`, e);
           lastErr = e;
         }
       }
@@ -429,6 +430,7 @@ export async function createGenerator(
           try {
             return await pipeline('text-generation', modelRef, await loadOptions(dtype, 'wasm'));
           } catch (e) {
+            console.error(`[local-ai] attempt failed: dtype=${dtype} device=wasm`, e);
             lastErr = e;
           }
         }
@@ -453,9 +455,21 @@ export async function createGenerator(
 
     if (result) return result;
 
-    throw lastErr instanceof Error
-      ? lastErr
-      : new Error(String(lastErr ?? `Could not load ${model.label} from ${modelRef}`));
+    // Full diagnostics: a bare error code in the toast helps nobody — log the
+    // failing stage/URL/dtype chain and surface a descriptive message. The
+    // original error is preserved via `cause` so DevTools shows the stack.
+    const detail = lastErr instanceof Error
+      ? `${lastErr.name}: ${lastErr.message}`
+      : String(lastErr ?? 'unknown');
+    console.error('[local-ai] model load failed', {
+      model: model.label,
+      ref: modelRef,
+      remote: useRemote,
+      dtypes: dtypesToTry,
+      device,
+      lastError: lastErr,
+    });
+    throw new Error(`Could not load ${model.label} from ${modelRef} (${detail})`, { cause: lastErr });
   })();
 
   cache.set(model.id, promise);

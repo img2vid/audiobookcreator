@@ -411,7 +411,12 @@ export function AutoBookView() {
       const status = await warmLocalAiModel(settings.localAiModelId, (p) => setModelOp({ phase: 'download', p }));
       toast({ title: 'AI model ready', description: `${status.modelName} is downloaded — analysis will use it.` });
     } catch (e: any) {
-      toast({ title: 'Model download failed', description: e?.message ?? 'unknown error', variant: 'destructive' });
+      console.error('[autobook] downloadModel failed', e);
+      toast({
+        title: 'Model download failed',
+        description: `${e?.name ?? 'Error'}: ${e?.message ?? 'unknown'} — see DevTools console for the [local-ai] log`,
+        variant: 'destructive',
+      });
     } finally {
       setModelOp(null);
       refreshAiStatus();
