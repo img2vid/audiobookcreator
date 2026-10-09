@@ -81,3 +81,32 @@ different voices and the same character always sounds the same.
   from https://github.com/rhasspy/piper.
 - **macOS pitch control** — `say` has no pitch parameter; pitch is ignored on
   that engine (rate and volume still apply; volume is applied in the app).
+
+## Retired built-in voice packs
+
+Earlier releases listed extra catalog entries — **AuraVoice Formant Core /
+Studio**, **VoxMecha Lite**, **Storybook Voice Pack**, **WhisperKit Profiles**,
+**Polyglot Latin Pack**, **Clarity Broadcast**, **DeepContext Pro** and
+**EmotiveX Emotion Engine**. These were not real speech engines:
+
+- All except Polyglot and Clarity were parameter presets of the built-in
+  AuraVoice *formant* synthesizer (a parametric model that generates audio
+  from math, not speech data), so they could never sound natural.
+- "DeepContext Pro" and "EmotiveX" were explicitly *simulated* packs — no
+  engine existed behind them.
+- "Polyglot Latin Pack" and "Clarity Broadcast" were selectors over the same
+  system neural voices as "OS Neural Voices (Auto-detect)".
+
+They have been removed from the catalog. Every selectable engine now renders
+through an established OS-level speech stack (SAPI 5 / Apple Speech /
+espeak-ng / Piper). The formant synthesizer remains in the codebase only as:
+
+1. the emergency fallback when the OS bridge is unreachable (the render log
+   and a toast always disclose this), and
+2. the persona format for character casts, whose profiles map onto real OS
+   voices.
+
+**Nothing needs to be installed or uploaded** to use the remaining engines —
+Windows SAPI, macOS `say` and Linux espeak-ng ship with (or are one package
+install away on) your OS. Piper is the only optional add-on, and it is purely
+a local install (see Troubleshooting), never a GitHub upload.

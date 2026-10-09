@@ -8,8 +8,14 @@ import type { TTSModelDef } from '@/lib/types';
  *  - "system-neural" / "system-classic" models map onto the browser's Web
  *    Speech voices (which wrap the same OS runtimes) for live preview, and to
  *    the bridge for file renders when it is running.
- *  - "formant" models use the built-in AuraVoice synthesis engine — the only
- *    engine that needs no OS integration at all.
+ *
+ * The former "AuraVoice Formant Core/Studio", "VoxMecha", "Storybook Voice
+ * Pack", "WhisperKit Profiles", "DeepContext Pro" and "EmotiveX" catalog
+ * entries were retired: they were all presets of the built-in parametric
+ * formant synthesizer (and the two "Pro" packs were simulated), not real
+ * speech engines. The formant synth remains ONLY as an emergency fallback
+ * when no OS engine is reachable, and as the persona definition format that
+ * maps onto real OS voices.
  * Everything runs locally.
  */
 export const TTS_MODELS: TTSModelDef[] = [
@@ -66,71 +72,6 @@ export const TTS_MODELS: TTSModelDef[] = [
     gpuRecommended: false,
   },
   {
-    id: 'aura-formant-core',
-    name: 'AuraVoice Formant Core',
-    family: 'AuraVoice Built-in',
-    lang: 'en',
-    sizeMB: 0.4,
-    quality: 3,
-    engine: 'formant',
-    bundled: true,
-    description: 'Bundled parametric synthesis engine. Zero dependencies, infinite length, instant cold start. Works even without OS integration.',
-    tags: ['bundled', 'offline', 'unlimited-length'],
-    gpuRecommended: false,
-  },
-  {
-    id: 'aura-formant-studio',
-    name: 'AuraVoice Formant Studio',
-    family: 'AuraVoice Built-in',
-    lang: 'en',
-    sizeMB: 0.9,
-    quality: 3,
-    engine: 'formant',
-    bundled: true,
-    description: 'High-fidelity variant of the built-in engine with richer formant sets and 44.1 kHz rendering.',
-    tags: ['bundled', 'offline', '44.1kHz'],
-    gpuRecommended: false,
-  },
-  {
-    id: 'vox-mecha-lite',
-    name: 'VoxMecha Lite',
-    family: 'VoxMecha',
-    lang: 'en',
-    sizeMB: 38,
-    quality: 2,
-    engine: 'formant',
-    bundled: true,
-    description: 'Compact robotic profile set for retro/cyberpunk narration styles.',
-    tags: ['bundled', 'robotic', 'stylized'],
-    gpuRecommended: false,
-  },
-  {
-    id: 'storybook-pack',
-    name: 'Storybook Voice Pack',
-    family: 'AuraVoice Built-in',
-    lang: 'en',
-    sizeMB: 1.2,
-    quality: 3,
-    engine: 'formant',
-    bundled: true,
-    description: 'Narrator-tuned profiles (Atlas, Nova, Storyteller) with expressive pitch contours for audiobooks.',
-    tags: ['bundled', 'audiobook', 'expressive'],
-    gpuRecommended: false,
-  },
-  {
-    id: 'whisper-kit',
-    name: 'WhisperKit Profiles',
-    family: 'AuraVoice Built-in',
-    lang: 'en',
-    sizeMB: 0.6,
-    quality: 2,
-    engine: 'formant',
-    bundled: true,
-    description: 'Breathy ASMR-style whisper profiles.',
-    tags: ['bundled', 'whisper'],
-    gpuRecommended: false,
-  },
-  {
     id: 'polyglot-latin',
     name: 'Polyglot Latin Pack',
     family: 'System Runtime',
@@ -139,7 +80,7 @@ export const TTS_MODELS: TTSModelDef[] = [
     quality: 4,
     engine: 'system-neural',
     bundled: true,
-    description: 'Routes synthesis to any installed voice for Latin-script languages (es, fr, de, pt, it…).',
+    description: 'Not a separate engine — routes the OS neural voices you already have to Latin-script languages (es, fr, de, pt, it…). Same established runtime as OS Neural Voices.',
     tags: ['bundled', 'multi-language'],
     gpuRecommended: false,
   },
@@ -152,7 +93,7 @@ export const TTS_MODELS: TTSModelDef[] = [
     quality: 4,
     engine: 'system-neural',
     bundled: true,
-    description: 'Prefers crisp news-anchor style neural voices with neutral pacing.',
+    description: 'Not a separate engine — prefers crisp news-anchor style neural voices among the ones installed on this machine. Same established runtime as OS Neural Voices.',
     tags: ['bundled', 'news'],
     gpuRecommended: false,
   },
@@ -165,35 +106,9 @@ export const TTS_MODELS: TTSModelDef[] = [
     quality: 1,
     engine: 'system-classic',
     bundled: true,
-    description: 'Maximum-compatibility mode using the very first voice the OS exposes.',
+    description: 'Maximum-compatibility mode using the very first classic voice the OS exposes. Not a separate engine — the most conservative pick from your installed OS voices.',
     tags: ['bundled', 'fallback'],
     gpuRecommended: false,
-  },
-  {
-    id: 'deep-ctx-pro',
-    name: 'DeepContext Pro',
-    family: 'VoxMecha',
-    lang: 'en',
-    sizeMB: 310,
-    quality: 4,
-    engine: 'formant',
-    bundled: false,
-    description: 'Context-aware prosody planner: analyses punctuation depth and discourse markers before synthesis. Simulated pack — Pro tier.',
-    tags: ['pro', 'prosody'],
-    gpuRecommended: true,
-  },
-  {
-    id: 'emotive-x',
-    name: 'EmotiveX Emotion Engine',
-    family: 'VoxMecha',
-    lang: 'en',
-    sizeMB: 480,
-    quality: 5,
-    engine: 'formant',
-    bundled: false,
-    description: 'Adds emotion curves (excited, solemn, sympathetic) on top of the formant renderer. Simulated pack — Pro tier.',
-    tags: ['pro', 'emotion'],
-    gpuRecommended: true,
   },
 ];
 

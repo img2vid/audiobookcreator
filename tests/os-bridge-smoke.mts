@@ -68,5 +68,12 @@ check('auto-pick prefers the best-ranked (piper neural) voice for neutral', v1?.
 // 5. default catalog: OS bridge model ships first (new default selection)
 check('default model is the OS Speech Engine', TTS_MODELS[0].id === 'os-native-speech');
 
+// 6. honest catalog: no simulated/fake engine packs are selectable
+const RETIRED = ['aura-formant-core', 'aura-formant-studio', 'vox-mecha-lite', 'storybook-pack', 'whisper-kit', 'deep-ctx-pro', 'emotive-x'];
+check('retired formant packs are gone from the catalog', RETIRED.every((id) => !TTS_MODELS.some((m) => m.id === id)));
+check('every catalog entry routes to a real OS-level runtime', TTS_MODELS.every((m) => m.engine !== 'formant'));
+check('selectors (polyglot/clarity) use the established system-neural runtime',
+  ['polyglot-latin', 'clarity-broadcast'].every((id) => TTS_MODELS.find((m) => m.id === id)?.engine === 'system-neural'));
+
 console.log(`\n${pass} checks passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

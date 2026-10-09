@@ -5,12 +5,15 @@ import { useAppStore } from '@/lib/stores/app-store';
 import { groupVoicesByLang, listNeuralVoices, listSystemVoices, isSpeechSynthesisAvailable } from '@/lib/engines/speech';
 import {
   VOICE_PROFILES,
+  allVoiceProfiles,
   registerCustomProfiles,
   synthesizeSpeech,
   synthesizeSpeechWithProfile,
 } from '@/lib/engines/formant';
+import { pickOsVoiceForProfile } from '@/lib/engines/dispatch';
+import { probeOsTtsBridge, synthesizeViaBridge } from '@/lib/engines/os-tts-bridge';
 import { aiDesignVoiceProfile } from '@/lib/engines/ai-services';
-import type { VoiceProfileDef } from '@/lib/types';
+import type { OsTtsEngineId, VoiceProfileDef } from '@/lib/types';
 import { TTS_MODELS } from '@/lib/data/tts-models';
 import { SectionPanel } from '@/components/widgets/section-panel';
 import { Button } from '@/components/ui/button';
@@ -33,7 +36,7 @@ import {
   Search, Sparkles, Trash2, Volume2,
 } from 'lucide-react';
 
-const AUDITION_LINE = 'Hello! This is my custom AuraVoice voice, synthesized entirely inside your browser.';
+const AUDITION_LINE = 'Hello! This is how this voice profile sounds with the speech engine selected on your machine.';
 
 const GENDERS: VoiceProfileDef['gender'][] = ['female', 'male', 'neutral'];
 
@@ -135,15 +138,52 @@ export function VoiceLibraryView() {
     u.onend = () => setPreviewing(null);
   };
 
+  /** Audition through the ESTABLISHED OS engine when the bridge is running —
+   *  the exact voice this profile maps to in renders — falling back to the
+   *  built-in formant synth only when no OS engine is reachable. */
+  const auditionBestEngine = async (
+    text: string,
+    profileId: string,
+    gender: VoiceProfileDef['gender'] | undefined,
+    formantRender: () => Promise<AudioBuffer>,
+  ): Promise<{ buffer: AudioBuffer; viaBridge: boolean; label?: string }> => {
+    try {
+      const probe = await probeOsTtsBridge();
+      if (probe.status.ok && probe.voices.length > 0) {
+        const voice = pickOsVoiceForProfile(probe.voices, profileId, gender, 'en');
+        if (voice) {
+          const res = await synthesizeViaBridge({
+            engine: voice.engine as OsTtsEngineId,
+            voice: voice.name,
+            text,
+          });
+          return { buffer: res.buffer, viaBridge: true, label: `${voice.engine} · ${voice.name}` };
+        }
+      }
+    } catch {
+      // bridge unreachable → formant fallback below
+    }
+    return { buffer: await formantRender(), viaBridge: false };
+  };
+
   const previewProfile = async (profileId: string, name: string) => {
     try {
       setPreviewing(profileId);
-      const buf = await synthesizeSpeech('Hello from Openmukti Audiobook Creator. This built-in voice profile runs fully offline.', {
-        profileId, rate: 1, pitch: 1, volume: 1, quality: 'balanced',
-      });
+      const gender = allVoiceProfiles().find((p) => p.id === profileId)?.gender;
+      const audition = await auditionBestEngine(AUDITION_LINE, profileId, gender, () =>
+        synthesizeSpeech(AUDITION_LINE, {
+          profileId, rate: 1, pitch: 1, volume: 1, quality: 'balanced',
+        }),
+      );
+      if (!audition.viaBridge) {
+        toast({
+          title: 'Previewed with the built-in synth',
+          description: 'Start the OS bridge (npm run os-tts) to audition this profile with the real OS voice it maps to.',
+        });
+      }
       const ctx = new AudioContext();
       const src = ctx.createBufferSource();
-      src.buffer = buf;
+      src.buffer = audition.buffer;
       src.connect(ctx.destination);
       src.onended = () => { setPreviewing(null); void ctx.close(); };
       src.start();
@@ -237,12 +277,20 @@ export function VoiceLibraryView() {
     try {
       stopCustomAudition();
       setCustomAuditioning(profile.id);
-      const buf = await synthesizeSpeechWithProfile(profile, AUDITION_LINE, {
-        rate: 1, pitch: 1, volume: 1, quality: 'fast',
-      });
+      const audition = await auditionBestEngine(AUDITION_LINE, profile.id, profile.gender, () =>
+        synthesizeSpeechWithProfile(profile, AUDITION_LINE, {
+          rate: 1, pitch: 1, volume: 1, quality: 'fast',
+        }),
+      );
+      if (!audition.viaBridge) {
+        toast({
+          title: 'Previewed with the built-in synth',
+          description: 'Start the OS bridge (npm run os-tts) to audition this profile with the real OS voice it maps to.',
+        });
+      }
       const ctx = new AudioContext();
       const src = ctx.createBufferSource();
-      src.buffer = buf;
+      src.buffer = audition.buffer;
       src.connect(ctx.destination);
       customAudioRef.current = { ctx, src };
       src.onended = () => {
@@ -639,16 +687,16 @@ export function VoiceLibraryView() {
       <SectionPanel title="About local voices" description="Where each voice actually comes from.">
         <div className="grid gap-3 text-xs leading-relaxed text-muted-foreground md:grid-cols-3">
           <div className="rounded-lg border bg-muted/30 p-3">
-            <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground"><Library className="h-3.5 w-3.5" />Bundled engine</div>
-            The AuraVoice formant synthesizer ships inside this app — 12 profiles, zero bytes to download, works with the network cable unplugged.
+            <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground"><Library className="h-3.5 w-3.5" />OS speech engines</div>
+            Every engine in the catalog is your machine&apos;s own speech stack — Windows SAPI 5 / Natural voices, macOS Apple Speech, Linux espeak-ng, plus optional Piper neural voices. The OS bridge (npm run os-tts) renders files with these exact voices. Nothing to download.
           </div>
           <div className="rounded-lg border bg-muted/30 p-3">
-            <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground"><Mic2 className="h-3.5 w-3.5" />System runtime</div>
-            Your OS/browser ships neural voices (Windows Natural, macOS Siri, Chrome voices). AuraVoice drives them locally — audio is synthesized on-device.
+            <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground"><Mic2 className="h-3.5 w-3.5" />Voice profiles</div>
+            Profiles (built-in and custom) are persona definitions — gender, pitch, timbre. They map deterministically onto real OS voices, so multi-voice books keep a distinct system voice per character. Auditions use the same mapping.
           </div>
           <div className="rounded-lg border bg-muted/30 p-3">
-            <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground"><Brain className="h-3.5 w-3.5" />Pro packs</div>
-            Marked &quot;pro&quot; entries describe expansion packs for the formant engine (emotion curves, context prosody). They are listed for completeness; bundled ones are always active.
+            <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground"><Brain className="h-3.5 w-3.5" />Built-in synth — fallback only</div>
+            The AuraVoice formant synthesizer runs in-browser as an emergency engine when no OS engine is reachable. It is intentionally robotic — exports always prefer the established OS engines and say so when they fall back.
           </div>
         </div>
       </SectionPanel>

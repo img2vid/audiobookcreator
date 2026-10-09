@@ -64,7 +64,7 @@ export const FEATURES: FeatureEntry[] = [
 
   // ---------- Voice & Model Library ----------
   ...group('Voice & Model Library', 'voice', [
-    ['Model catalog', 'Ten bundled + pro-tier local model definitions with quality/size metadata.'],
+    ['Model catalog', 'Seven established local engine definitions (OS engines, Piper, system runtimes) with quality metadata.'],
     ['OS voice scanning', 'Lists every voice installed on the machine (Windows/macOS/Linux runtimes).'],
     ['Neural voice filter', 'Detects Natural/Neural/Premium/Enhanced/Siri-class voices automatically.'],
     ['Language grouping', 'Voices grouped by primary language tag.'],
@@ -74,10 +74,10 @@ export const FEATURES: FeatureEntry[] = [
     ['Preferred system voice', 'Pin a default voiceURI for AI synthesis.', 'config'],
     ['Voice capability badges', 'Local-only vs network, quality stars and tags per model.'],
     ['GPU recommendation flags', 'Models that benefit from GPU acceleration are marked in the library.'],
-    ['Model family grouping', 'AuraVoice Built-in, System Runtime and VoxMecha families.'],
+    ['Model family grouping', 'OS Bridge and System Runtime families — every entry is a real engine.'],
     ['Engine mapping transparency', 'Every model documents exactly which underlying engine it uses.'],
     ['Per-module voice override', 'Audiobook chapters can pin different voices than TTS Studio.'],
-    ['Formant profile browser', 'Browse and audition all 12 built-in synthesis profiles.'],
+    ['OS-voice profile auditions', 'Browse and audition voice profiles — each plays the real OS voice it maps to when the bridge is running.'],
     ['Voice metadata export', 'Copy voice lists as JSON for support or documentation.'],
   ]),
 

@@ -185,6 +185,9 @@ export function TtsStudioView() {
   // really picks neural ones. No more one-engine-for-everything.
   const voiceClass = voiceClassForModel(model);
   const isBridgeModel = model.engine === 'os-bridge';
+  // Every OS-level model (os-bridge, system-neural, system-classic) can render
+  // through the bridge — so previews use the EXACT render path for all of them.
+  const isOsLevelModel = model.engine !== 'formant';
   const bridgeUp = mounted && !!bridgeStatus?.ok && bridgeVoices.length > 0;
   const words = useMemo(() => text.trim() ? text.trim().split(/\s+/).length : 0, [text]);
 
@@ -887,9 +890,10 @@ export function TtsStudioView() {
     if (!prepared.text.trim()) return;
     stopPreview();
     stopRenderedPlayback();
-    // OS bridge models WITH the bridge running: preview through the real OS
-    // engine (SAPI / say / espeak-ng / Piper) — the exact render path.
-    if (isBridgeModel && bridgeUp) {
+    // OS-level models WITH the bridge running: preview through the real OS
+    // engine (SAPI / say / espeak-ng / Piper) — the exact render path, so what
+    // you hear in the preview is what the exported file sounds like.
+    if (isOsLevelModel && !settings.fallbackMode && bridgeUp) {
       const previewText = prepared.text.length > 900 ? prepared.text.slice(0, 900) : prepared.text;
       setPlaying(true);
       void synthesizeWithSelectedEngine(previewText, {
@@ -981,7 +985,7 @@ export function TtsStudioView() {
         toast({ title: 'Fallback engine error', description: String(e), variant: 'destructive' });
       });
     }
-  }, [prepared.text, usesAI, isBridgeModel, bridgeUp, osVoiceId, voiceURI, voiceClass, model, rate, pitch, volume, profileId, tuned.synthesisQuality, settings.autoFallback, settings.fallbackMode, stopPreview, stopRenderedPlayback, markupInfo.hasMarkup, setEngine, toast]);
+  }, [prepared.text, usesAI, isOsLevelModel, bridgeUp, osVoiceId, voiceURI, voiceClass, model, rate, pitch, volume, profileId, tuned.synthesisQuality, settings.autoFallback, settings.fallbackMode, stopPreview, stopRenderedPlayback, markupInfo.hasMarkup, setEngine, toast]);
 
   const togglePause = useCallback(() => {
     const q = speechQueue.current;
@@ -1044,6 +1048,11 @@ export function TtsStudioView() {
           api.log(result.fallbackReason);
           setEngineNote(result.fallbackReason);
           setEngine({ ttsEngine: 'fallback', fallbackReason: result.fallbackReason });
+          toast({
+            title: 'Fell back to the built-in engine',
+            description: result.fallbackReason,
+            variant: 'destructive',
+          });
         } else {
           setEngine({ ttsEngine: result.engineUsed === 'os-bridge' ? 'os-bridge' : result.engineUsed === 'ai' ? 'ai' : 'fallback' });
         }
