@@ -15,6 +15,25 @@ import type { OsTtsBridgeStatus, OsTtsEngineId, OsTtsVoiceDef } from '@/lib/type
 const BRIDGE_URL_KEY = 'os-tts-bridge-url';
 export const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:8477';
 
+/**
+ * Accept loose human input ("127.0.0.1", "localhost", "localhost:8477") and
+ * turn it into a full bridge URL. Bare loopback hosts get the default port.
+ */
+export function normalizeBridgeUrl(input: string): string {
+  let v = input.trim().replace(/\/+$/, '');
+  if (!v) return '';
+  if (!/^https?:\/\//i.test(v)) v = `http://${v}`;
+  try {
+    const u = new URL(v);
+    if (!u.port && /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)) {
+      u.port = '8477';
+    }
+    return u.toString().replace(/\/+$/, '');
+  } catch {
+    return v;
+  }
+}
+
 /** User-configurable bridge URL (localStorage; falls back to the default). */
 export function getBridgeUrl(): string {
   if (typeof window === 'undefined') return DEFAULT_BRIDGE_URL;
@@ -29,7 +48,7 @@ export function getBridgeUrl(): string {
 export function setBridgeUrl(url: string): void {
   if (typeof window === 'undefined') return;
   try {
-    const clean = url.trim().replace(/\/+$/, '');
+    const clean = normalizeBridgeUrl(url);
     if (!clean || clean === DEFAULT_BRIDGE_URL) window.localStorage.removeItem(BRIDGE_URL_KEY);
     else window.localStorage.setItem(BRIDGE_URL_KEY, clean);
   } catch { /* private mode — ignore */ }
@@ -80,7 +99,9 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
   inFlight = (async (): Promise<ProbeResult> => {
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 2500);
+      // 10 s: a cold bridge answers /ping instantly, but on some Windows boxes
+      // even process startup can lag — do not give up before it had a chance.
+      const timer = setTimeout(() => ctrl.abort(), 10_000);
       const res = await fetch(`${url}/ping`, { signal: ctrl.signal, cache: 'no-store' });
       clearTimeout(timer);
       if (!res.ok) throw new Error(`bridge /ping → HTTP ${res.status}`);

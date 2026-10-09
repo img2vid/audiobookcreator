@@ -228,7 +228,7 @@ export function TtsStudioView() {
     setBridgeVoices(res.voices);
     setBridgeProbing(false);
     if (res.status.ok) toast({ title: 'OS speech bridge detected', description: `${res.voices.length} voices from your operating system's speech engines.` });
-    else toast({ title: 'Bridge not reachable', description: `Start it with: npm run os-tts (${res.status.url})`, variant: 'destructive' });
+    else toast({ title: 'Bridge not reachable', description: `Start it with: npm run os-tts (${res.status.url})${res.status.error ? ` — ${res.status.error}` : ''}`, variant: 'destructive' });
   }, [bridgeUrlDraft, toast]);
 
   const updateOsVoiceId = useCallback((id: string) => {

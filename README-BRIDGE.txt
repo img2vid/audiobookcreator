@@ -25,20 +25,27 @@ WINDOWS — 5 steps
    KEEP THIS WINDOW OPEN while you use the app.
    Success looks like:
      [os-tts] ..:..:.. OS Speech Bridge listening on http://127.0.0.1:8477
-     [os-tts] ..:..:.. engines: sapi (N voices)
-   If Windows Firewall asks for permission → click "Allow access".
+   (A first voice scan may add a line a few seconds later. If Windows
+   Firewall asks for permission → click "Allow access".)
 
 5) Back in the app (TTS Studio → "OS speech bridge" box):
-   - Clear the URL field (it then uses the built-in default
-     http://127.0.0.1:8477) or type it EXACTLY like that.
-     NOTE: the port is 8477 — not 9477, not 3000.
+   - Leave the URL field EMPTY (the app then uses the built-in default
+     http://127.0.0.1:8477). If you typed anything there before, clear it —
+     a typo like port 9477 instead of 8477 will keep the bridge "not ready".
    - Click "Retry". The box turns green: "online (N OS voices)".
+     If the first Retry shows 0 voices or still not ready, wait ~5 seconds
+     and press Retry once more — the very first voice scan (Windows runs
+     PowerShell for it) can take a few seconds.
 
 QUICK SELF-TEST
 ---------------
 With the bridge running, open this in your browser:
     http://127.0.0.1:8477/ping
 You should see JSON like {"ok":true,"platform":"win32","engines":{"sapi":true},...}
+If that page works but the app still says "not reachable", tell the assistant
+exactly what address your app is open at (http://localhost:3000 or a
+https://... address) — HTTPS-hosted pages need the newest patch, which is
+already applied in this ZIP.
 
 WHAT THE BRIDGE DOES
 --------------------

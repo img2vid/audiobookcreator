@@ -31,6 +31,18 @@ Keep it running next to the app (dev server or `npm run preview` / a static
 host). TTS Studio shows the bridge status in the **Engine & Voice** panel and
 picks it up automatically — press **Retry** if you started it afterwards.
 
+Notes:
+
+- The first voice scan (Windows: PowerShell enumerating SAPI voices) can take
+  a few seconds. `/ping` answers **instantly** while the scan warms up in the
+  background; the voice list arrives on the next probe. Repeated probes share
+  a single scan.
+- In the bridge URL field you can type the bare host — `127.0.0.1` or
+  `localhost` — and the app completes it to `http://127.0.0.1:8477`.
+- Pages served over HTTPS (e.g. GitHub Pages) or from another machine on the
+  LAN can reach this loopback bridge because the server answers Chrome's
+  *Private Network Access* preflight (`Access-Control-Allow-Private-Network`).
+
 Environment options:
 
 ```bash

@@ -391,24 +391,36 @@ ENGINES.piper = {
 // ------------------------------------------------------------ engine status
 
 let enginesCache = { at: 0, available: {}, voices: [] };
+let refreshInFlight = null;
 
 async function refreshEngines(force = false) {
   if (!force && Date.now() - enginesCache.at < 15_000) return enginesCache;
-  const available = {};
-  for (const [id, eng] of Object.entries(ENGINES)) {
-    try { available[id] = await eng.available(); } catch { available[id] = false; }
-  }
-  const voices = [];
-  for (const id of Object.keys(ENGINES)) {
-    if (!available[id]) continue;
-    try {
-      for (const v of await ENGINES[id].list()) voices.push(v);
-    } catch (err) {
-      log(`voice list for ${id} failed:`, err.message);
+  // Share ONE enumeration between concurrent / overlapping callers. The first
+  // scan spawns PowerShell on Windows (seconds); without this dedup every
+  // retried /ping would spawn yet another scan and none would finish early.
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const available = {};
+    for (const [id, eng] of Object.entries(ENGINES)) {
+      try { available[id] = await eng.available(); } catch { available[id] = false; }
     }
+    const voices = [];
+    for (const id of Object.keys(ENGINES)) {
+      if (!available[id]) continue;
+      try {
+        for (const v of await ENGINES[id].list()) voices.push(v);
+      } catch (err) {
+        log(`voice list for ${id} failed:`, err.message);
+      }
+    }
+    enginesCache = { at: Date.now(), available, voices };
+    return enginesCache;
+  })();
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
   }
-  enginesCache = { at: Date.now(), available, voices };
-  return enginesCache;
 }
 
 function pickEngine(requested) {
@@ -446,6 +458,12 @@ const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
+  // Chrome "Private Network Access": pages served over HTTPS (e.g. GitHub Pages)
+  // or from the LAN may talk to this loopback bridge ONLY if the preflight
+  // response carries this header — without it Chrome blocks the request even
+  // though CORS above is wide open. Harmless for plain-http localhost use.
+  'Access-Control-Allow-Private-Network': 'true',
+  'Access-Control-Max-Age': '600',
 };
 
 const server = http.createServer(async (req, res) => {
@@ -460,21 +478,27 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === 'GET' && (route === '/ping' || route === '/' )) {
-      const status = await refreshEngines();
+      // Liveness must be INSTANT. The first engine scan (PowerShell on Windows)
+      // can take several seconds — never make /ping wait for it: answer from the
+      // cache and warm the cache in the background. /voices awaits the shared
+      // scan, so clients that want the voice list simply block a little longer.
+      const warming = Date.now() - enginesCache.at >= 15_000;
+      if (warming) void refreshEngines().catch(() => { /* logged inside */ });
       sendJson(res, 200, {
         ok: true,
         server: 'os-tts-bridge',
         version: VERSION,
         platform: PLATFORM,
-        engines: status.available,
-        voiceCount: status.voices.length,
+        engines: enginesCache.available,
+        voiceCount: enginesCache.voices.length,
+        ...(warming ? { warming: true } : {}),
         piperVoicesDir: piperVoicesDir || undefined,
       });
       return;
     }
 
     if (req.method === 'GET' && route === '/voices') {
-      const status = await refreshEngines(true);
+      const status = await refreshEngines();
       sendJson(res, 200, { voices: status.voices, engines: status.available });
       return;
     }
