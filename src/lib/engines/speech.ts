@@ -17,7 +17,7 @@
 //   4. Chrome silently stalls utterances after ~15 s. → a keep-alive
 //      interval nudges the queue while it is speaking.
 // The public API is unchanged: SpeechSpeaker, SpeechQueue, listSystemVoices…
-import type { SpeakerHandlers, SpeakOptions } from '@/lib/types';
+import type { SpeakerHandlers, SpeakOptions, SystemVoiceClass } from '@/lib/types';
 
 export function isSpeechSynthesisAvailable(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
@@ -84,7 +84,7 @@ export function prepareTextForNeuralSpeech(text: string): string {
 }
 
 // ---------- voice quality ranking ----------
-const ROBOTIC_VOICE_RE = /espeak|flite|pico|festival|mbrola|freetts|mbrola|cephstral|robotic|sam\b/i;
+const ROBOTIC_VOICE_RE = /espeak|flite|pico|festival|mbrola|freetts|cephstral|robotic|sam\b/i;
 const NEURAL_VOICE_RE = /neural|natural|premium|enhanced|studio/i;
 
 /**
@@ -94,17 +94,41 @@ const NEURAL_VOICE_RE = /neural|natural|premium|enhanced|studio/i;
  * used when nothing better exists.
  */
 export function scoreVoice(v: SpeechSynthesisVoice, lang?: string): number {
+  return scoreVoiceForClass(v, lang, 'neural');
+}
+
+/**
+ * Class-aware voice scoring. This is what makes engine selection REAL:
+ *  - 'neural'   → neural/natural/premium voices float to the top.
+ *  - 'classic'  → classic local SAPI-style voices (localService, no
+ *                 neural/online branding) float to the top, so selecting
+ *                 “OS Classic Voices” actually yields a classic voice.
+ *  - 'any'      → plain naturalness ranking (legacy behavior).
+ */
+export function scoreVoiceForClass(v: SpeechSynthesisVoice, lang: string | undefined, voiceClass: SystemVoiceClass): number {
   let s = 0;
   const name = v.name;
-  if (NEURAL_VOICE_RE.test(name)) s += 45;
-  if (/siri/i.test(name)) s += 38;
-  if (/google/i.test(name)) s += 30;
-  if (/\b(online|cloud)\b/i.test(name)) s += 14;
-  if (/microsoft/i.test(name)) s += 8;
-  if (v.localService) s += 6;
-  else s += 4; // network voices often sound best; keep a small base
-  if (ROBOTIC_VOICE_RE.test(name)) s -= 55;
-  if (/\b(compact|basic|eloquence)\b/i.test(name)) s -= 30;
+  const neuralish = NEURAL_VOICE_RE.test(name) || /\b(online|cloud)\b/i.test(name) || /siri/i.test(name) || /google/i.test(name);
+  if (voiceClass === 'classic') {
+    // classic ranking: the plain local voices the OS has shipped for years
+    if (v.localService) s += 40;
+    else s -= 24; // network voices are (almost) always the neural ones
+    if (neuralish) s -= 45; // explicitly avoid neural branding
+    if (/microsoft/i.test(name)) s += 10; // David / Zira desktop classics
+    if (/\b(david|zira|mark|hazel|susan|alex|fred|ralph|kathy|albert)\b/i.test(name)) s += 12;
+    if (ROBOTIC_VOICE_RE.test(name)) s -= 20; // still the last resort
+    if (/\b(compact|basic|eloquence)\b/i.test(name)) s -= 24;
+  } else {
+    if (NEURAL_VOICE_RE.test(name)) s += 45;
+    if (/siri/i.test(name)) s += 38;
+    if (/google/i.test(name)) s += 30;
+    if (/\b(online|cloud)\b/i.test(name)) s += 14;
+    if (/microsoft/i.test(name)) s += 8;
+    if (v.localService) s += 6;
+    else s += 4; // network voices often sound best; keep a small base
+    if (ROBOTIC_VOICE_RE.test(name)) s -= 55;
+    if (/\b(compact|basic|eloquence)\b/i.test(name)) s -= 30;
+  }
   if (v.default) s += 3;
   if (lang) {
     const want = lang.split(/[-_]/)[0].toLowerCase();
@@ -122,6 +146,33 @@ export function pickBestVoice(voices: SpeechSynthesisVoice[], lang?: string): Sp
   let bestScore = -Infinity;
   for (const v of voices) {
     const s = scoreVoice(v, lang);
+    if (s > bestScore) {
+      bestScore = s;
+      best = v;
+    }
+  }
+  return best;
+}
+
+/**
+ * Resolve the voice the SPEAKER actually asked for, honoring the engine's
+ * voice class when no explicit voice is configured:
+ *   1. exact voiceURI match (the user's explicit selection always wins)
+ *   2. best voice of the requested class + language
+ *   3. best voice of that class in any language
+ * Returns null when the browser exposes no voices at all.
+ */
+export function pickVoiceForOptions(voices: SpeechSynthesisVoice[], opts: Pick<SpeakOptions, 'voiceURI' | 'voiceClass' | 'lang'>): SpeechSynthesisVoice | null {
+  if (!voices.length) return null;
+  if (opts.voiceURI) {
+    const exact = voices.find((x) => x.voiceURI === opts.voiceURI);
+    if (exact) return exact;
+  }
+  const voiceClass: SystemVoiceClass = opts.voiceClass ?? 'any';
+  let best: SpeechSynthesisVoice | null = null;
+  let bestScore = -Infinity;
+  for (const v of voices) {
+    const s = scoreVoiceForClass(v, opts.lang, voiceClass);
     if (s > bestScore) {
       bestScore = s;
       best = v;
@@ -204,14 +255,15 @@ export class SpeechSpeaker {
     this.cancel();
     const u = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices();
-    let voice: SpeechSynthesisVoice | undefined;
-    if (opts.voiceURI) voice = voices.find((x) => x.voiceURI === opts.voiceURI);
-    // No (or unknown) voice configured → pick the most natural one available
-    // instead of letting the OS default to a robotic engine voice.
-    if (!voice) voice = pickBestVoice(voices) ?? undefined;
+    // Resolve the voice the user (or the selected engine) asked for — an
+    // unknown voiceURI falls back to the requested voice CLASS, never to a
+    // hard-coded neural default.
+    const voice = pickVoiceForOptions(voices, opts) ?? undefined;
     if (voice) {
       u.voice = voice;
       if (voice.lang) u.lang = voice.lang;
+    } else if (opts.lang) {
+      u.lang = opts.lang;
     }
     if (opts.rate != null) u.rate = Math.max(0.1, Math.min(10, opts.rate));
     if (opts.pitch != null) u.pitch = Math.max(0, Math.min(2, opts.pitch));

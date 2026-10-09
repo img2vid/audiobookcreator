@@ -169,11 +169,43 @@ export interface SpeakerHandlers {
   onBoundary?: (charIndex: number, word: string) => void;
   onEnd?: (error?: Error) => void;
 }
+/**
+ * Which class of system voice to use when the selected engine is an OS-level
+ * one. 'neural' prefers neural/natural voices, 'classic' prefers the classic
+ * SAPI-style local voices — the selected model's engine decides, so choosing
+ * “OS Classic Voices” actually yields classic voices instead of neural ones.
+ */
+export type SystemVoiceClass = 'neural' | 'classic' | 'any';
 export interface SpeakOptions {
   voiceURI?: string;
+  /** Voice class to honor when voiceURI is unset or unknown. Default 'any'. */
+  voiceClass?: SystemVoiceClass;
+  /** Preferred language tag ('en', 'de', …) used for auto voice picking. */
+  lang?: string;
   rate?: number;
   pitch?: number;
   volume?: number;
+}
+
+// ---------- OS speech bridge (established OS engines via local server) ----------
+export type OsTtsEngineId = 'sapi' | 'say' | 'espeak-ng' | 'espeak' | 'piper';
+export interface OsTtsVoiceDef {
+  id: string;
+  engine: OsTtsEngineId;
+  name: string;
+  lang: string;
+  gender?: 'male' | 'female';
+  neural?: boolean;
+  quality?: number;
+  description?: string;
+}
+export interface OsTtsBridgeStatus {
+  url: string;
+  ok: boolean;
+  platform?: string;
+  engines?: Partial<Record<OsTtsEngineId, boolean>>;
+  voiceCount?: number;
+  error?: string;
 }
 
 // ---------- File ingestion ----------
@@ -392,6 +424,7 @@ export interface FeatureEntry {
 }
 
 // ---------- TTS model registry ----------
+export type TtsEngineKind = 'system-neural' | 'system-classic' | 'os-bridge' | 'formant';
 export interface TTSModelDef {
   id: string;
   name: string;
@@ -399,7 +432,7 @@ export interface TTSModelDef {
   lang: string;
   sizeMB: number;
   quality: 1 | 2 | 3 | 4 | 5;
-  engine: 'system-neural' | 'system-classic' | 'formant';
+  engine: TtsEngineKind;
   bundled: boolean;
   description: string;
   tags: string[];
@@ -409,7 +442,10 @@ export interface TTSModelDef {
 // ---------- TTS render result ----------
 export interface TtsRenderResult {
   buffer: AudioBuffer;
-  engineUsed: 'ai' | 'fallback';
+  /** Which engine actually rendered this audio. */
+  engineUsed: 'os-bridge' | 'ai' | 'fallback';
+  /** Human-readable label of the engine/voice that rendered the audio. */
+  engineLabel: string;
   chars: number;
   durationSec: number;
   fallbackReason?: string;

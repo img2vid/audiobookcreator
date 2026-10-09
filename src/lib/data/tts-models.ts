@@ -1,11 +1,70 @@
 import type { TTSModelDef } from '@/lib/types';
 
 /**
- * Local TTS model catalog. "system-neural" models map onto the OS/browser
- * neural voices; "system-classic" onto classic SAPI-style voices; "formant"
- * onto the built-in AuraVoice synthesis engine. Everything runs locally.
+ * Local TTS model catalog.
+ *  - "os-bridge" models route renders to the ESTABLISHED speech engine that
+ *    ships with your OS (Windows SAPI 5, macOS Apple Speech, Linux espeak-ng)
+ *    or to Piper neural voices — via the local bridge server (`npm run os-tts`).
+ *  - "system-neural" / "system-classic" models map onto the browser's Web
+ *    Speech voices (which wrap the same OS runtimes) for live preview, and to
+ *    the bridge for file renders when it is running.
+ *  - "formant" models use the built-in AuraVoice synthesis engine — the only
+ *    engine that needs no OS integration at all.
+ * Everything runs locally.
  */
 export const TTS_MODELS: TTSModelDef[] = [
+  {
+    id: 'os-native-speech',
+    name: 'OS Speech Engine (native)',
+    family: 'OS Bridge',
+    lang: 'multi',
+    sizeMB: 0,
+    quality: 5,
+    engine: 'os-bridge',
+    bundled: true,
+    description: 'Renders through the established speech engine installed with your OS — Windows SAPI 5, macOS Apple Speech (say) or Linux espeak-ng — via the local bridge server (npm run os-tts). Real OS voices in previews AND file exports.',
+    tags: ['bundled', 'os-level', 'renders-to-file', 'multi-language'],
+    gpuRecommended: false,
+  },
+  {
+    id: 'os-piper-neural',
+    name: 'Piper Neural (OS Bridge)',
+    family: 'OS Bridge',
+    lang: 'multi',
+    sizeMB: 0,
+    quality: 5,
+    engine: 'os-bridge',
+    bundled: true,
+    description: 'Realistic neural-network voices via the Piper engine on your machine (set PIPER_VOICES_DIR when starting the bridge). The most lifelike fully-local option when Piper is installed.',
+    tags: ['bundled', 'os-level', 'neural', 'renders-to-file'],
+    gpuRecommended: false,
+  },
+  {
+    id: 'system-neural-auto',
+    name: 'OS Neural Voices (Auto-detect)',
+    family: 'System Runtime',
+    lang: 'multi',
+    sizeMB: 0,
+    quality: 5,
+    engine: 'system-neural',
+    bundled: true,
+    description: 'Automatically uses the highest-quality neural voices installed on this machine (Edge/Windows Natural, macOS Siri voices, etc.). Previews speak in-browser; file renders go through the OS bridge when it is running.',
+    tags: ['bundled', 'best-quality', 'multi-language'],
+    gpuRecommended: false,
+  },
+  {
+    id: 'system-classic',
+    name: 'OS Classic Voices',
+    family: 'System Runtime',
+    lang: 'multi',
+    sizeMB: 0,
+    quality: 2,
+    engine: 'system-classic',
+    bundled: true,
+    description: 'Classic SAPI-style system voices (Microsoft David/Zira, Apple Fred…). Selection is honored: classic local voices are picked instead of neural ones. Very low latency, extremely stable for batch jobs.',
+    tags: ['bundled', 'low-latency', 'classic'],
+    gpuRecommended: false,
+  },
   {
     id: 'aura-formant-core',
     name: 'AuraVoice Formant Core',
@@ -15,7 +74,7 @@ export const TTS_MODELS: TTSModelDef[] = [
     quality: 3,
     engine: 'formant',
     bundled: true,
-    description: 'Bundled parametric synthesis engine. Zero dependencies, infinite length, instant cold start.',
+    description: 'Bundled parametric synthesis engine. Zero dependencies, infinite length, instant cold start. Works even without OS integration.',
     tags: ['bundled', 'offline', 'unlimited-length'],
     gpuRecommended: false,
   },
@@ -30,32 +89,6 @@ export const TTS_MODELS: TTSModelDef[] = [
     bundled: true,
     description: 'High-fidelity variant of the built-in engine with richer formant sets and 44.1 kHz rendering.',
     tags: ['bundled', 'offline', '44.1kHz'],
-    gpuRecommended: false,
-  },
-  {
-    id: 'system-neural-auto',
-    name: 'OS Neural Voices (Auto-detect)',
-    family: 'System Runtime',
-    lang: 'multi',
-    sizeMB: 0,
-    quality: 5,
-    engine: 'system-neural',
-    bundled: true,
-    description: 'Automatically uses the highest-quality neural voices installed on this machine (Edge/Windows Natural, macOS Siri voices, etc.).',
-    tags: ['bundled', 'best-quality', 'multi-language'],
-    gpuRecommended: false,
-  },
-  {
-    id: 'system-classic',
-    name: 'OS Classic Voices',
-    family: 'System Runtime',
-    lang: 'multi',
-    sizeMB: 0,
-    quality: 2,
-    engine: 'system-classic',
-    bundled: true,
-    description: 'Classic SAPI-style system voices. Very low latency, extremely stable for batch jobs.',
-    tags: ['bundled', 'low-latency'],
     gpuRecommended: false,
   },
   {

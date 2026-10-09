@@ -5,6 +5,8 @@ import { useAppStore } from '@/lib/stores/app-store';
 import { useMounted } from '@/hooks/use-mounted';
 import { enqueueJob } from '@/lib/queue';
 import { allVoiceProfiles, estimateSpeechDurationSec, isCustomProfile } from '@/lib/engines/formant';
+import { synthesizeWithSelectedEngine } from '@/lib/engines/dispatch';
+import { TTS_MODELS, getModel } from '@/lib/data/tts-models';
 import { synthesizeWithMarkup, parseVoiceMarkup, estimateMarkupDurationSec } from '@/lib/engines/markup';
 import {
   AUDIO_FORMATS, countAvailableFormats, encodeAudioBufferChunked, getFormat, isFormatAvailable, recorderSupportMap,
@@ -1024,10 +1026,21 @@ export function AudiobookView() {
         const prepared = applyRules(ch.text);
         const info = parseVoiceMarkup(prepared, { rate: ch.rate, pitch: 1, volume: 1 });
         if (info.hasMarkup) api.log(`Voice markup detected: ${info.tagsUsed.join(', ')}`);
-        // markup-aware synthesis: [pause], [em], [rate], [spell], [whisper] all honored
-        const buf = await synthesizeWithMarkup(prepared, {
+        // markup-aware synthesis via the ENGINE DISPATCHER: [pause], [em], [rate],
+        // [spell], [whisper] are honored, and OS-level models render with real OS voices
+        const selectedModel = getModel(useAppStore.getState().settings.preferredModelId) ?? TTS_MODELS[0];
+        api.log(selectedModel.engine === 'formant' || settings.fallbackMode
+          ? 'Rendering with the built-in AuraVoice engine…'
+          : `Rendering with the selected engine (${selectedModel.name})…`);
+        const result = await synthesizeWithSelectedEngine(prepared, {
+          model: selectedModel,
           profileId: ch.voiceProfile, rate: ch.rate, pitch: 1, volume: 1, quality: tuned.synthesisQuality,
-        }, (p) => api.setProgress(p * 0.85, `Synthesizing ${(p * 100).toFixed(0)}%`));
+          forceFallback: settings.fallbackMode,
+          fallbackOnBridgeUnavailable: true,
+          onProgress: (p) => api.setProgress(p * 0.85, `Synthesizing ${(p * 100).toFixed(0)}%`),
+        });
+        api.log(`Engine actually used: ${result.engineLabel}`);
+        const buf = result.buffer;
         if (api.shouldCancel()) return;
         await api.waitWhilePaused();
         api.setProgress(0.9, 'Normalizing…');

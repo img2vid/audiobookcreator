@@ -501,12 +501,16 @@ function planSentence(
   if (phones.length === 0) return phones;
 
   // --- pass 2: word-level F0 knots (declination / question rise / emphasis) ---
+  // Wh-questions ("Where did she go?") carry a falling contour like statements;
+  // only yes/no questions get the rising contour. Detect them from the opening word.
+  const whQuestion = endPunct === '?' && /^(who|whom|whose|what|when|where|why|how|which)\b/i.test(norm.trim());
   const wordF0 = new Array<number>(words.length).fill(base);
   for (let wi = 0; wi < words.length; wi++) {
     const u = wi / n;
     let m: number;
     if (flat) m = 1;
-    else if (endPunct === '?') m = 1.02 + 0.14 * u; // rising question
+    else if (whQuestion) m = 1.065 - 0.165 * u; // wh-question: energetic fall
+    else if (endPunct === '?') m = 1.02 + 0.14 * u; // rising yes/no question
     else if (endPunct === '!') m = 1.05 - 0.09 * u; // emphatic fall
     else m = 1.055 - 0.145 * u; // declarative declination
     wordF0[wi] = Math.max(55, base * m);
@@ -909,7 +913,7 @@ function renderSentence(
       bp.frequency.value = def.band[0];
       bp.Q.value = def.band[1];
       const g = ctx.createGain();
-      g.gain.setValueCurveAtTime(fricativeEnvelope(dur, def.type === 'aspirate' ? 0.09 : 0.26, rng), t0, dur);
+      g.gain.setValueCurveAtTime(fricativeEnvelope(dur, def.type === 'aspirate' ? 0.09 : 0.23, rng), t0, dur);
       nsrc.connect(bp);
       bp.connect(g);
       g.connect(bus);
@@ -1078,8 +1082,13 @@ async function synthesizeWithProfile(
     const rng = mulberry32(sharedRng());
     const phones = planSentence(s, opts, profile, rng, endPunct);
     if (phones.length === 0) continue;
-    // sentence pause: honor explicit gapMs, else natural 130–300 ms breathing room
-    const pauseSec = explicitGap != null ? explicitGap + rng() * 0.05 : flat ? 0.16 : 0.13 + rng() * 0.17;
+    // sentence pause: honor explicit gapMs, else natural 130–300 ms breathing room.
+    // Long sentences occasionally get an even longer narrator breath — real
+    // audiobook narration breathes at phrase groups, not on a metronome.
+    let pauseSec = explicitGap != null ? explicitGap + rng() * 0.05 : flat ? 0.16 : 0.13 + rng() * 0.17;
+    if (explicitGap == null && !flat && s.split(/\s+/).length > 9 && rng() < 0.4) {
+      pauseSec += 0.14 + rng() * 0.16;
+    }
     const buf = await renderSentence(phones, opts, profile, sampleRate, 0.05 + pauseSec, rng);
     buffers.push(buf);
     onProgress?.((i + 1) / sentences.length);

@@ -22,7 +22,8 @@ import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { useAppStore } from '@/lib/stores/app-store';
 import { enqueueJob } from '@/lib/queue';
 import { allVoiceProfiles } from '@/lib/engines/formant';
-import { synthesizeWithMarkup } from '@/lib/engines/markup';
+import { synthesizeWithSelectedEngine } from '@/lib/engines/dispatch';
+import { TTS_MODELS, getModel } from '@/lib/data/tts-models';
 import { ingestFile } from '@/lib/engines/ingest';
 import {
   toDialogueFormat, withEmotionMarkup,
@@ -561,6 +562,8 @@ export function AutoBookView() {
     const pasted = pastedText;
     const fmtId = settings.outputFormat || 'wav-16';
     const quality = tuned.synthesisQuality;
+    // the SELECTED TTS model decides the render engine (OS bridge / system / formant)
+    const selectedModel = getModel(useAppStore.getState().settings.preferredModelId) ?? TTS_MODELS[0];
     const profilesSnapshot = profiles;
     const maxCastSnapshot = maxCast;
     const genreSnapshot = genreMode;
@@ -657,6 +660,11 @@ export function AutoBookView() {
         if (api.shouldCancel()) return;
 
         // ---------- production: synthesize every speakable unit ----------
+        api.log(
+          selectedModel.engine === 'formant' || settings.fallbackMode
+            ? 'Narrating with the built-in AuraVoice engine…'
+            : `Narrating with the selected engine (${selectedModel.name})…`,
+        );
         const edited = analysis.units.map((u) => {
           const e = unitEdits[u.id];
           if (!e) return u;
@@ -680,7 +688,21 @@ export function AutoBookView() {
             pitch: analysis.cast.find((c) => c.name === u.speaker)?.pitch ?? 1,
           };
           const spoken = withEmotionMarkup(u.text, u.emotionHint);
-          const buf = await synthesizeWithMarkup(spoken, { profileId: cast.profileId, rate: cast.rate, pitch: cast.pitch, volume: 1, quality });
+          // engine dispatch: OS-level models render with real OS voices (each
+          // character keeps a distinct voice via the profile → OS voice map);
+          // formant models render with the bundled engine as before.
+          const rendered = await synthesizeWithSelectedEngine(spoken, {
+            model: selectedModel,
+            profileId: cast.profileId,
+            rate: cast.rate,
+            pitch: cast.pitch,
+            volume: 1,
+            quality,
+            forceFallback: settings.fallbackMode,
+            fallbackOnBridgeUnavailable: true,
+          });
+          if (i === 0) api.log(`Engine actually used: ${rendered.engineLabel}`);
+          const buf = rendered.buffer;
           timings.push({ unitId: u.id, speaker: u.speaker, text: u.text, startSec: cursor, endSec: cursor + buf.duration, chapterIndex: u.chapterIndex });
           pieces.push(buf);
           const next = speakable[i + 1];

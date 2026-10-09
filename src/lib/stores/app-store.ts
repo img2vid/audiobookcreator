@@ -61,7 +61,7 @@ export interface AppSettings {
 }
 
 export interface EngineStatus {
-  ttsEngine: 'ai' | 'fallback' | 'error' | 'idle';
+  ttsEngine: 'ai' | 'os-bridge' | 'fallback' | 'error' | 'idle';
   lastError?: string;
   fallbackReason?: string;
   systemVoices: number;

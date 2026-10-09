@@ -12,6 +12,7 @@
     "build": "npm run prepare:local-assets && next build",
     "preview": "node scripts/serve-out.mjs",
     "start": "node scripts/serve-out.mjs",
+    "os-tts": "node scripts/os-tts-server.mjs",
     "lint": "eslint .",
     "test:engine": "node --experimental-loader ./tests/alias-loader.mjs tests/engine.test.mts",
     "typecheck": "tsc --noEmit",

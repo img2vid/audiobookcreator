@@ -6,6 +6,10 @@ import { useMounted } from '@/hooks/use-mounted';
 import { enqueueJob } from '@/lib/queue';
 import { SpeechQueue, listSystemVoices, isSpeechSynthesisAvailable } from '@/lib/engines/speech';
 import {
+  probeOsTtsBridge, invalidateBridgeCache, getBridgeUrl, setBridgeUrl, OS_ENGINE_CAPS,
+} from '@/lib/engines/os-tts-bridge';
+import { synthesizeWithSelectedEngine, voiceClassForModel } from '@/lib/engines/dispatch';
+import {
   allVoiceProfiles,
   estimateSpeechDurationSec,
   isCustomProfile,
@@ -25,7 +29,7 @@ import {
 import { aiNormalizeForSpeech } from '@/lib/engines/ai-services';
 import { analyzeBuffer, normalizeBuffer, fadeBuffer, trimSilenceBuffer, gainBuffer, sliceBuffer, eqBuffer, compressBuffer, EQ_PRESETS, VOICE_MASTER_COMPRESSOR, applyVolumeEnvelope, normalizeEnvelopePoints, type EnvelopePoint } from '@/lib/engines/dsp';
 import { TTS_MODELS } from '@/lib/data/tts-models';
-import type { AssetItem } from '@/lib/types';
+import type { AssetItem, OsTtsBridgeStatus, OsTtsVoiceDef } from '@/lib/types';
 import { SectionPanel } from '@/components/widgets/section-panel';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -49,8 +53,8 @@ import { formatBytes, formatDuration, formatNumber } from '@/lib/utils/format';
 import { uid, yieldToUI } from '@/lib/utils/async';
 import { saveProject } from '@/lib/engines/project-vault';
 import {
-  AudioLines, AudioWaveform, BookA, Check, CircleHelp, Crop, Download, Flame, HardDriveDownload, Mic2, Pause, Play, Plus, Repeat,
-  RotateCcw, Save, Scissors, Sparkles, Square, Trash2, TriangleAlert, Upload, Volume2, Wand2, Waves, X, Zap, ZoomIn,
+  AudioLines, AudioWaveform, BookA, Check, CircleHelp, Crop, Download, Flame, HardDriveDownload, Mic2, Pause, Play, Plus, RefreshCw, Repeat,
+  RotateCcw, Save, Scissors, Server, Sparkles, Square, Trash2, TriangleAlert, Upload, Volume2, Wand2, Waves, X, Zap, ZoomIn,
 } from 'lucide-react';
 
 const SAMPLE_TEXT = `Welcome to Openmukti Audiobook Creator — a fully local text-to-speech workstation.
@@ -155,6 +159,13 @@ export function TtsStudioView() {
   const [lexImportText, setLexImportText] = useState('');
   const [newFind, setNewFind] = useState('');
   const [newReplace, setNewReplace] = useState('');
+  // OS speech bridge — established OS engines (SAPI / say / espeak-ng / Piper) via the
+  // local companion server. Probed once on mount; manual retry available in the UI.
+  const [bridgeStatus, setBridgeStatus] = useState<OsTtsBridgeStatus | null>(null);
+  const [bridgeVoices, setBridgeVoices] = useState<OsTtsVoiceDef[]>([]);
+  const [bridgeProbing, setBridgeProbing] = useState(false);
+  const [bridgeUrlDraft, setBridgeUrlDraft] = useState('');
+  const [osVoiceId, setOsVoiceId] = useState('');
 
   const speechQueue = useRef<SpeechQueue | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -169,6 +180,12 @@ export function TtsStudioView() {
 
   const model = useMemo(() => TTS_MODELS.find((m) => m.id === modelId) ?? TTS_MODELS[0], [modelId]);
   const usesAI = mounted && model.engine !== 'formant' && !settings.fallbackMode && isSpeechSynthesisAvailable();
+  // The selected model's engine class decides WHICH system voices are used —
+  // “OS Classic Voices” really picks classic local voices, “OS Neural Voices”
+  // really picks neural ones. No more one-engine-for-everything.
+  const voiceClass = voiceClassForModel(model);
+  const isBridgeModel = model.engine === 'os-bridge';
+  const bridgeUp = mounted && !!bridgeStatus?.ok && bridgeVoices.length > 0;
   const words = useMemo(() => text.trim() ? text.trim().split(/\s+/).length : 0, [text]);
 
   // voice profile picker = built-ins + registered custom voices (recomputed whenever the
@@ -182,6 +199,38 @@ export function TtsStudioView() {
   // load the shared lexicon once
   useEffect(() => {
     setLexRules(loadLexicon());
+  }, []);
+
+  // ---- OS speech bridge: probe on mount, restore the persisted bridge voice ----
+  useEffect(() => {
+    let cancelled = false;
+    setBridgeProbing(true);
+    try { setOsVoiceId(window.localStorage.getItem('os-tts-voice') ?? ''); } catch { /* ignore */ }
+    setBridgeUrlDraft('');
+    void probeOsTtsBridge().then((res) => {
+      if (cancelled) return;
+      setBridgeStatus(res.status);
+      setBridgeVoices(res.voices);
+      setBridgeProbing(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const retryBridge = useCallback(async () => {
+    if (bridgeUrlDraft.trim()) setBridgeUrl(bridgeUrlDraft.trim());
+    invalidateBridgeCache();
+    setBridgeProbing(true);
+    const res = await probeOsTtsBridge(true);
+    setBridgeStatus(res.status);
+    setBridgeVoices(res.voices);
+    setBridgeProbing(false);
+    if (res.status.ok) toast({ title: 'OS speech bridge detected', description: `${res.voices.length} voices from your operating system's speech engines.` });
+    else toast({ title: 'Bridge not reachable', description: `Start it with: npm run os-tts (${res.status.url})`, variant: 'destructive' });
+  }, [bridgeUrlDraft, toast]);
+
+  const updateOsVoiceId = useCallback((id: string) => {
+    setOsVoiceId(id);
+    try { window.localStorage.setItem('os-tts-voice', id); } catch { /* ignore */ }
   }, []);
 
   // Register the persisted custom voice profiles with the formant engine (idempotent —
@@ -838,12 +887,47 @@ export function TtsStudioView() {
     if (!prepared.text.trim()) return;
     stopPreview();
     stopRenderedPlayback();
+    // OS bridge models WITH the bridge running: preview through the real OS
+    // engine (SAPI / say / espeak-ng / Piper) — the exact render path.
+    if (isBridgeModel && bridgeUp) {
+      const previewText = prepared.text.length > 900 ? prepared.text.slice(0, 900) : prepared.text;
+      setPlaying(true);
+      void synthesizeWithSelectedEngine(previewText, {
+        model, profileId, osVoiceId: osVoiceId || undefined, voiceURI: voiceURI || undefined,
+        rate, pitch, volume, quality: tuned.synthesisQuality, forceFallback: settings.fallbackMode,
+      }).then((res) => {
+        const ctx = audioCtxRef.current ?? new AudioContext();
+        audioCtxRef.current = ctx;
+        const src = ctx.createBufferSource();
+        src.buffer = res.buffer;
+        src.connect(ctx.destination);
+        src.onended = () => { setPlaying(false); setPlayProgress(0); };
+        audioSrcRef.current = src;
+        src.start();
+        setEngine({ ttsEngine: 'os-bridge' });
+        const t0 = ctx.currentTime;
+        const tick = () => {
+          if (!audioSrcRef.current) return;
+          setPlayProgress(Math.min(1, (ctx.currentTime - t0) / res.buffer.duration));
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }).catch((e) => {
+        setPlaying(false);
+        toast({ title: 'OS engine error', description: e instanceof Error ? e.message : String(e), variant: 'destructive' });
+      });
+      return;
+    }
     if (usesAI) {
       const q = new SpeechQueue(180);
       speechQueue.current = q;
-      // AI voices cannot honor markup — strip it so tags are never read aloud
+      // AI voices cannot honor markup — strip it so tags are never read aloud.
+      // voiceClass makes the model selection real: classic models pick classic
+      // voices, neural models pick neural voices.
       q.start(markupInfo.hasMarkup ? stripVoiceMarkup(prepared.text) : prepared.text, {
         voiceURI: voiceURI || undefined,
+        voiceClass,
+        lang: model.lang !== 'multi' ? model.lang : undefined,
         rate: Math.min(10, Math.max(0.1, rate)),
         pitch: Math.min(2, Math.max(0, pitch)),
         volume,
@@ -897,7 +981,7 @@ export function TtsStudioView() {
         toast({ title: 'Fallback engine error', description: String(e), variant: 'destructive' });
       });
     }
-  }, [prepared.text, usesAI, voiceURI, rate, pitch, volume, profileId, tuned.synthesisQuality, settings.autoFallback, stopPreview, stopRenderedPlayback, markupInfo.hasMarkup, setEngine, toast]);
+  }, [prepared.text, usesAI, isBridgeModel, bridgeUp, osVoiceId, voiceURI, voiceClass, model, rate, pitch, volume, profileId, tuned.synthesisQuality, settings.autoFallback, settings.fallbackMode, stopPreview, stopRenderedPlayback, markupInfo.hasMarkup, setEngine, toast]);
 
   const togglePause = useCallback(() => {
     const q = speechQueue.current;
@@ -932,14 +1016,37 @@ export function TtsStudioView() {
     const jobId = enqueueJob(
       { type: 'tts-render', label: `Render ${formatNumber(words)} words → ${getFormat(formatId)?.label ?? formatId}` },
       async (api) => {
-        api.log('Synthesizing with local formant engine…');
-        // 1. synthesize (lexicon substitutions + voice markup honored)
+        api.log(
+          model.engine === 'formant' || settings.fallbackMode
+            ? 'Synthesizing with the built-in AuraVoice engine…'
+            : `Synthesizing with the selected engine (${model.name})…`,
+        );
+        // 1. synthesize via the ENGINE DISPATCHER — routes to the engine the user
+        //    selected: OS bridge (SAPI / say / espeak-ng / Piper) for OS-level
+        //    models, the bundled formant engine otherwise. No more silent swap.
         if (prepared.substitutions > 0) {
           api.log(`Lexicon: ${prepared.substitutions} substitution${prepared.substitutions === 1 ? '' : 's'} (${prepared.applied.slice(0, 5).join(', ')}${prepared.applied.length > 5 ? '…' : ''})`);
         }
-        const raw = await synthesizeWithMarkup(prepared.text, {
-          profileId, rate, pitch, volume, quality: tuned.synthesisQuality,
-        }, (p) => api.setProgress(p * 0.7, `Synthesizing ${(p * 100).toFixed(0)}%`));
+        const result = await synthesizeWithSelectedEngine(prepared.text, {
+          model,
+          profileId,
+          osVoiceId: osVoiceId || undefined,
+          voiceURI: voiceURI || undefined,
+          rate, pitch, volume,
+          quality: tuned.synthesisQuality,
+          forceFallback: settings.fallbackMode,
+          fallbackOnBridgeUnavailable: settings.autoFallback,
+          onProgress: (p) => api.setProgress(p * 0.7, `Synthesizing ${(p * 100).toFixed(0)}%`),
+        });
+        const raw = result.buffer;
+        api.log(`Engine actually used: ${result.engineLabel}`);
+        if (result.fallbackReason) {
+          api.log(result.fallbackReason);
+          setEngineNote(result.fallbackReason);
+          setEngine({ ttsEngine: 'fallback', fallbackReason: result.fallbackReason });
+        } else {
+          setEngine({ ttsEngine: result.engineUsed === 'os-bridge' ? 'os-bridge' : result.engineUsed === 'ai' ? 'ai' : 'fallback' });
+        }
         api.log(`Synthesis done: ${raw.duration.toFixed(1)}s of audio`);
         if (api.shouldCancel()) return;
         await api.waitWhilePaused();
@@ -989,7 +1096,7 @@ export function TtsStudioView() {
           durationSec: exportBuf.duration,
           buffer: exportBuf,
           blobUrl: URL.createObjectURL(blob),
-          meta: { engine: 'formant', profile: profileId, chars: prepared.text.length, format: formatId, lexicon: prepared.substitutions, eq: eqPresetId, compressor: useCompressor },
+          meta: { engine: result.engineUsed, engineLabel: result.engineLabel, profile: profileId, chars: prepared.text.length, format: formatId, lexicon: prepared.substitutions, eq: eqPresetId, compressor: useCompressor },
         };
         addAsset(asset);
         setLastBuffer(exportBuf);
@@ -1022,7 +1129,7 @@ export function TtsStudioView() {
         setRenderProgress(job.progress);
       }
     }, 400);
-  }, [prepared, rendering, words, profileId, rate, pitch, volume, tuned.synthesisQuality, opts, eqPresetId, useCompressor, formatId, settings.sampleRate, settings.channels, addAsset, stopRenderedPlayback, toast]);
+  }, [prepared, rendering, words, model, profileId, osVoiceId, voiceURI, rate, pitch, volume, tuned.synthesisQuality, opts, eqPresetId, useCompressor, formatId, settings.sampleRate, settings.channels, settings.fallbackMode, settings.autoFallback, addAsset, stopRenderedPlayback, setEngine, toast]);
 
   // ---------- highlight render ----------
   const highlighted = useMemo(() => {
@@ -1456,20 +1563,80 @@ export function TtsStudioView() {
               </div>
             </div>
 
-            {usesAI ? (
+            {(isBridgeModel || model.engine.startsWith('system')) && (
+              <div className={cn('rounded-md border p-2.5 text-[11px] leading-relaxed', bridgeUp ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-amber-500/30 bg-amber-500/10')}>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 font-medium">
+                    <Server className="h-3.5 w-3.5" />
+                    OS speech bridge {bridgeProbing ? '· probing…' : bridgeUp
+                      ? `· online (${bridgeVoices.length} OS voices)`
+                      : '· not running'}
+                  </span>
+                  <Button size="sm" variant="ghost" className="h-6 gap-1 px-2 text-[11px]" onClick={() => void retryBridge()} disabled={bridgeProbing}>
+                    <RefreshCw className={cn('h-3 w-3', bridgeProbing && 'animate-spin')} />Retry
+                  </Button>
+                </div>
+                {bridgeUp ? (
+                  <p className="mt-1 text-muted-foreground">
+                    Detected: {Object.entries(bridgeStatus?.engines ?? {}).filter(([, ok]) => ok).map(([id]) => OS_ENGINE_CAPS[id as keyof typeof OS_ENGINE_CAPS]?.label ?? id).join(' · ') || 'system engines'} — renders use the real OS voice.
+                  </p>
+                ) : (
+                  <>
+                    <p className="mt-1 text-muted-foreground">
+                      Renders with OS voices need the local bridge server (the browser alone cannot capture system speech to files). Start it next to the app:
+                    </p>
+                    <div className="mt-1.5 flex items-center gap-1.5">
+                      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">npm run os-tts</code>
+                      <Input
+                        value={bridgeUrlDraft}
+                        onChange={(e) => setBridgeUrlDraft(e.target.value)}
+                        placeholder={getBridgeUrl()}
+                        className="h-6 max-w-44 bg-background font-mono text-[10px]"
+                        aria-label="Bridge server URL"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {isBridgeModel && bridgeUp ? (
               <div className="space-y-1.5">
-                <Label className="flex items-center gap-1.5 text-xs"><Mic2 className="h-3.5 w-3.5" />System voice ({systemVoices.length} detected)</Label>
+                <Label className="flex items-center gap-1.5 text-xs"><Server className="h-3.5 w-3.5" />OS voice ({bridgeVoices.length} from your system)</Label>
+                <Select value={osVoiceId || 'auto'} onValueChange={(v) => updateOsVoiceId(v === 'auto' ? '' : v)}>
+                  <SelectTrigger aria-label="OS voice"><SelectValue /></SelectTrigger>
+                  <SelectContent className="max-h-64">
+                    <SelectItem value="auto">Auto (best match per voice profile)</SelectItem>
+                    {bridgeVoices.map((v) => (
+                      <SelectItem key={v.id} value={v.id}>
+                        {v.name} <span className="text-muted-foreground">({v.lang} · {OS_ENGINE_CAPS[v.engine]?.label ?? v.engine})</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground">
+                  Previews AND file exports render through this exact OS engine and voice.
+                </p>
+              </div>
+            ) : usesAI ? (
+              <div className="space-y-1.5">
+                <Label className="flex items-center gap-1.5 text-xs"><Mic2 className="h-3.5 w-3.5" />System voice ({systemVoices.length} detected · {voiceClass} class)</Label>
                 <Select value={voiceURI || 'auto'} onValueChange={(v) => { setVoiceURI(v === 'auto' ? '' : v); setSetting('preferredVoiceURI', v === 'auto' ? '' : v); }}>
                   <SelectTrigger aria-label="Voice"><SelectValue /></SelectTrigger>
                   <SelectContent className="max-h-64">
-                    <SelectItem value="auto">Auto (best match)</SelectItem>
+                    <SelectItem value="auto">Auto (best {voiceClass} match)</SelectItem>
                     {systemVoices.map((v) => (
                       <SelectItem key={v.voiceURI} value={v.voiceURI}>{v.name} <span className="text-muted-foreground">({v.lang})</span></SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
                 <p className="text-[11px] text-muted-foreground">
-                  Preview uses this neural voice. File exports always render with the built-in engine (exports must be capturable audio).
+                  {voiceClass === 'classic'
+                    ? 'Classic local voices are preferred automatically — the model selection is honored.'
+                    : 'Neural/natural voices are preferred automatically. '}
+                  {bridgeUp
+                    ? 'File exports render through the OS speech bridge when this model is rendered.'
+                    : 'Start the OS speech bridge (npm run os-tts) to render files with real OS voices.'}
                 </p>
               </div>
             ) : (
