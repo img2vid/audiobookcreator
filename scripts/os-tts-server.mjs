@@ -31,7 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = 1;
+const VERSION = 2;
 const PORT = Number(process.env.PORT) || 8477;
 const HOST = process.env.HOST || '127.0.0.1';
 const MAX_TEXT_CHARS = 25_000;
@@ -108,7 +108,13 @@ function sanitizeText(text) {
 
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
+  // CORS on EVERY response — the preflight alone is not enough. The page that
+  // calls us (http://localhost:3000 or https://<user>.github.io) is always a
+  // DIFFERENT origin than http://127.0.0.1:8477, so without ACAO on the actual
+  // response Chrome blocks the JSON with:
+  //   "No 'Access-Control-Allow-Origin' header is present on the requested resource"
   res.writeHead(code, {
+    ...CORS,
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
   });
@@ -119,6 +125,7 @@ function sendWav(res, file) {
   const data = fs.readFileSync(file);
   try { fs.unlinkSync(file); } catch { /* noop */ }
   res.writeHead(200, {
+    ...CORS,
     'Content-Type': 'audio/wav',
     'Content-Length': data.length,
     'Cache-Control': 'no-store',

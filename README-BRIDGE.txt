@@ -6,6 +6,17 @@ you start the local bridge server. The app (web page) and the bridge are TWO
 separate programs. Typing an IP into the app only changes WHERE it looks —
 it does not start anything. You must start the bridge yourself in a terminal.
 
+WHAT IS INSIDE THIS ZIP
+-----------------------
+This is your current GitHub repository state (your latest commits, vendored
+public/ort runtime, PATCH-NOTES.txt) WITH both bridge reachability fixes
+applied:
+  1. Instant /ping (first voice scan no longer races the probe) + Chrome
+     Private-Network-Access preflight support + probe timeout 2.5s -> 10s
+  2. CORS headers on EVERY JSON/WAV response (the root cause of
+     "No 'Access-Control-Allow-Origin' header" from GitHub Pages) — bridge
+     version is now 2.
+
 WINDOWS — 5 steps
 -----------------
 1) Install Node.js 20.9 or newer (https://nodejs.org → LTS installer).
@@ -15,7 +26,7 @@ WINDOWS — 5 steps
    - Open the folder in File Explorer, click the address bar, type: cmd
    - First time only, run:        npm install
 
-3) Start the app (terminal window 1):
+3) Start the app (terminal window 1) — OR use the GitHub Pages deployment:
                                   npm run dev
    Then open http://localhost:3000 in your browser.
 
@@ -25,27 +36,27 @@ WINDOWS — 5 steps
    KEEP THIS WINDOW OPEN while you use the app.
    Success looks like:
      [os-tts] ..:..:.. OS Speech Bridge listening on http://127.0.0.1:8477
-   (A first voice scan may add a line a few seconds later. If Windows
-   Firewall asks for permission → click "Allow access".)
+   Verify in your browser:  http://127.0.0.1:8477/ping
+   It must show JSON with  "version":2  (older unpatched bridges show 1 and
+   will NOT work from GitHub Pages — the CORS fix is in bridge version 2).
+   If Windows Firewall asks for permission → click "Allow access".
 
-5) Back in the app (TTS Studio → "OS speech bridge" box):
-   - Leave the URL field EMPTY (the app then uses the built-in default
-     http://127.0.0.1:8477). If you typed anything there before, clear it —
-     a typo like port 9477 instead of 8477 will keep the bridge "not ready".
+5) Back in the app — whether http://localhost:3000 or https://img2vid.github.io:
+   - Leave the bridge URL field EMPTY (built-in default http://127.0.0.1:8477).
+     A typo like port 9477 instead of 8477 keeps the bridge "not ready".
    - Click "Retry". The box turns green: "online (N OS voices)".
      If the first Retry shows 0 voices or still not ready, wait ~5 seconds
-     and press Retry once more — the very first voice scan (Windows runs
-     PowerShell for it) can take a few seconds.
+     and press Retry once more — the first voice scan (Windows runs
+     PowerShell for it) can take a few seconds. Probes share one scan.
 
-QUICK SELF-TEST
----------------
-With the bridge running, open this in your browser:
-    http://127.0.0.1:8477/ping
-You should see JSON like {"ok":true,"platform":"win32","engines":{"sapi":true},...}
-If that page works but the app still says "not reachable", tell the assistant
-exactly what address your app is open at (http://localhost:3000 or a
-https://... address) — HTTPS-hosted pages need the newest patch, which is
-already applied in this ZIP.
+CONSOLE ERRORS, EXPLAINED
+-------------------------
+- net::ERR_CONNECTION_REFUSED on http://127.0.0.1:8477/ping
+  → the bridge is simply not running. Start it (step 4).
+- "blocked by CORS policy: No 'Access-Control-Allow-Origin' header..."
+  from https://img2vid.github.io → the RUNNING bridge is an older version.
+  Bridge v2 (this tree) answers CORS on every response and Chrome's
+  Private-Network-Access preflight, so the GitHub Pages site can talk to it.
 
 WHAT THE BRIDGE DOES
 --------------------
@@ -62,4 +73,4 @@ FILES & BUILD
                     source automatically)
 - npm run os-tts  → the OS speech bridge (port 8477)
 - docs/OS_TTS_BRIDGE.md → full bridge documentation
-- PATCH-NOTES.txt → notes shipped with this tree
+- PATCH-NOTES.txt → notes shipped with your repository
