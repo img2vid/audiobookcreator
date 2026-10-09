@@ -1586,9 +1586,26 @@ export function TtsStudioView() {
                   </Button>
                 </div>
                 {bridgeUp ? (
-                  <p className="mt-1 text-muted-foreground">
-                    Detected: {Object.entries(bridgeStatus?.engines ?? {}).filter(([, ok]) => ok).map(([id]) => OS_ENGINE_CAPS[id as keyof typeof OS_ENGINE_CAPS]?.label ?? id).join(' · ') || 'system engines'} — renders use the real OS voice.
-                  </p>
+                  <>
+                    <p className="mt-1 text-muted-foreground">
+                      Detected: {Object.entries(bridgeStatus?.engines ?? {}).filter(([, ok]) => ok).map(([id]) => OS_ENGINE_CAPS[id as keyof typeof OS_ENGINE_CAPS]?.label ?? id).join(' · ') || 'system engines'} — renders use the real OS voice.
+                    </p>
+                    {(() => {
+                      // v4 bridges ship a reason for every unavailable engine — show the
+                      // most actionable ones (live scan diagnostics first, e.g. why the
+                      // modern Windows voices are missing) instead of a bare "false".
+                      const reasons = Object.entries(bridgeStatus?.engineInfo ?? {})
+                        .filter(([, info]) => info && !info.available && info.reason)
+                        .map(([id, info]) => `${id}: ${info!.reason}`)
+                        .slice(0, 2);
+                      if (!reasons.length) return null;
+                      return (
+                        <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground/80">
+                          Not detected — {reasons.join(' · ')}
+                        </p>
+                      );
+                    })()}
+                  </>
                 ) : (
                   <>
                     <p className="mt-1 text-muted-foreground">

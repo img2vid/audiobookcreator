@@ -188,7 +188,7 @@ export interface SpeakOptions {
 }
 
 // ---------- OS speech bridge (established OS engines via local server) ----------
-export type OsTtsEngineId = 'sapi' | 'say' | 'espeak-ng' | 'espeak' | 'piper';
+export type OsTtsEngineId = 'sapi' | 'winrt' | 'say' | 'espeak-ng' | 'espeak' | 'piper';
 export interface OsTtsVoiceDef {
   id: string;
   engine: OsTtsEngineId;
@@ -198,12 +198,19 @@ export interface OsTtsVoiceDef {
   neural?: boolean;
   quality?: number;
   description?: string;
+  // Piper only: absolute path of the .onnx model. Sent back to the bridge so
+  // even v3/v4 bridges (which trusted the client for it) render correctly.
+  modelPath?: string;
 }
 export interface OsTtsBridgeStatus {
   url: string;
   ok: boolean;
   platform?: string;
   engines?: Partial<Record<OsTtsEngineId, boolean>>;
+  // v4 bridges explain WHY an engine is unavailable (macOS-only, optional and
+  // not installed, or — for winrt — a live scan diagnosis) instead of a bare
+  // false. Old bridges simply omit the field.
+  engineInfo?: Partial<Record<OsTtsEngineId, { available: boolean; reason?: string }>>;
   voiceCount?: number;
   error?: string;
 }

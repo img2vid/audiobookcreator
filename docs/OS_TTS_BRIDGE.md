@@ -15,10 +15,15 @@ real WAV files:
 
 | Platform | Established engine used |
 |----------|------------------------|
-| Windows  | **SAPI 5** via `System.Speech` (Microsoft David, Zira, Natural voices…) |
+| Windows  | **Windows Natural Voices** via WinRT/OneCore (Aria, Jenny, Guy, all “Natural” neural voices, every language pack you added) **+ SAPI 5** via `System.Speech` (Microsoft David, Zira, legacy voices) |
 | macOS    | **Apple Speech** — the `say` CLI (Samantha, Alex, premium voices…) |
 | Linux    | **espeak-ng / espeak** (the standard Linux CLI speech engine) |
 | Any      | **Piper** — established open-source *neural* TTS, for lifelike quality (optional) |
+
+Why this matters: legacy SAPI 5 can only see the two classic desktop voices
+(David, Zira). The **modern, far more natural** voices installed with Windows
+live in the OneCore stack and are enumerated through the WinRT speech engine —
+the bridge queries BOTH, so every voice installed on the machine is usable.
 
 ## Start the bridge
 
@@ -88,9 +93,16 @@ different voices and the same character always sounds the same.
   app on HTTPS (GitHub Pages), some browsers block requests to
   `http://127.0.0.1`. Run the app locally (`npm run dev`) or set a custom
   bridge URL in the Engine & Voice panel.
-- **No voices listed** — install an engine: Windows ships SAPI by default;
-  `sudo apt install espeak-ng` on Debian/Ubuntu; Piper binaries and models
-  from https://github.com/rhasspy/piper.
+- **Only 2 voices listed (David, Zira)** — that is the legacy SAPI limit. The
+  bridge (version 3+) also enumerates the modern OneCore/Natural voices
+  (Aria, Jenny, Guy, …). To install MORE voices: Windows **Settings → Time &
+  Language → Speech → Manage voices → Add voices**, restart the bridge.
+- **`espeak-ng: false` on Windows though it is installed** — bridge version 3
+  checks `C:\Program Files\eSpeak NG\espeak-ng.exe` even when it is not on
+  PATH. Older bridges only looked on PATH (and Linux only).
+- **Piper** — put `piper.exe` on PATH or in `C:\Program Files\piper\`, and
+  its `*.onnx` models in a `voices` folder next to it (or set
+  `PIPER_VOICES_DIR`). Models: https://github.com/rhasspy/piper.
 - **macOS pitch control** — `say` has no pitch parameter; pitch is ignored on
   that engine (rate and volume still apply; volume is applied in the app).
 
@@ -122,3 +134,34 @@ espeak-ng / Piper). The formant synthesizer remains in the codebase only as:
 Windows SAPI, macOS `say` and Linux espeak-ng ship with (or are one package
 install away on) your OS. Piper is the only optional add-on, and it is purely
 a local install (see Troubleshooting), never a GitHub upload.
+
+## Bridge v4 — every "false" engine explains itself
+
+Since bridge version 4, an engine that is not available is never a bare
+`false` again:
+
+- **Console**: under `Detected engines: {...}` the bridge prints one
+  `id: false — <reason>` line per unavailable engine.
+- **HTTP**: `/ping` and `/voices` include an `engineInfo` map with the same
+  reasons; the app's bridge status box shows the first two reasons inline.
+- **WinRT diagnosis**: the Windows enumeration now always emits a
+  `WINRTINFO` line (projection state, PowerShell/.NET versions, voice count)
+  or a `WINRTERROR` line (exception type, message and inner exception), plus
+  a **registry cross-check** that counts the voice tokens under
+  `Speech_OneCore` and `Speech`. Two distinct winrt-false cases result:
+  1. *"0 OneCore voices are installed"* — the registry has no (or zero)
+     modern-voice tokens. Typical of LTSC, Enterprise evaluation and
+     de-bloated images. Fix: install voices via **Settings → Time &
+     Language → Speech → Add voices**, or as admin:
+     `Add-WindowsCapability -Online -Name Language.Speech~~~en-US~0.0.1.0`,
+     then restart the bridge.
+  2. *"WinRT projection failed: …"* — the speech API itself failed to load
+     (security policy, broken runtime). The logged exception pinpoints it.
+- **Transport hardening**: WinRT enumeration is sent to PowerShell via
+  `-EncodedCommand` (UTF-16LE base64), immune to argument quoting issues,
+  with a `-Command` retry fallback.
+
+The static reasons for the remaining engines are intentional: `say` is
+macOS-only, and `espeak-ng` / `espeak` / `piper` are optional installs —
+their reasons include where to get them. Self-checks:
+`node scripts/bridge-v4-checks.mjs` (static + live round-trip).

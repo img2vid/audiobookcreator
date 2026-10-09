@@ -36,6 +36,7 @@ import { parseVoiceMarkup } from '@/lib/engines/markup';
 /** Engine priority when auto-picking a bridge voice (realism first). */
 const ENGINE_PRIORITY: Record<OsTtsEngineId, number> = {
   piper: 50,
+  winrt: 45, // Windows Natural Voices (Aria, Jenny, Guy…) beat legacy SAPI
   sapi: 40,
   say: 35,
   'espeak-ng': 20,
@@ -260,7 +261,10 @@ async function renderViaOsBridge(
   if (!voice) throw new Error('No OS voices available');
 
   const engine = voice.engine as OsTtsEngineId;
-  const caps = OS_ENGINE_CAPS[engine];
+  // Unknown engine ids must NEVER crash a render (a NEW bridge can list
+  // engines an OLDER deployed app bundle does not know): treat them as fully
+  // capable — rate/pitch/volume are also honored server-side per engine.
+  const caps = OS_ENGINE_CAPS[engine] ?? { label: engine, rate: true, pitch: true, volume: true };
 
   // 2. plan segments (voice markup) → chunks per segment
   const base = { rate: opts.rate, pitch: opts.pitch, volume: opts.volume };
@@ -296,6 +300,7 @@ async function renderViaOsBridge(
     const res = await synthesizeViaBridge({
       engine,
       voice: voice!.name,
+      modelPath: voice!.modelPath,
       text: c.chunk,
       rate: caps.rate ? c.rate : undefined,
       pitch: caps.pitch ? c.pitch : undefined,

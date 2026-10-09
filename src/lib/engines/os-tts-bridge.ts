@@ -3,8 +3,9 @@
 // Talks to the zero-dependency local companion server
 // (scripts/os-tts-server.mjs, `npm run os-tts`) that renders WAV files
 // with the ESTABLISHED speech engine installed with the operating system:
-//   Windows → SAPI 5 (System.Speech)   macOS → Apple Speech (`say`)
-//   Linux   → espeak-ng / espeak       any OS → Piper neural voices
+//   Windows → Natural Voices (WinRT/OneCore: Aria, Jenny, …) + SAPI 5 (David, Zira)
+//   macOS   → Apple Speech (`say`)     Linux → espeak-ng / espeak
+//   any OS  → Piper neural voices
 //
 // The browser alone can synthesize OS voices for live preview (Web Speech
 // API) but CANNOT capture them into a file — this bridge is what makes
@@ -65,6 +66,7 @@ export interface OsEngineCaps {
 
 export const OS_ENGINE_CAPS: Record<OsTtsEngineId, OsEngineCaps> = {
   sapi: { label: 'Windows SAPI 5', rate: true, pitch: true, volume: true },
+  winrt: { label: 'Windows Natural Voices', rate: true, pitch: true, volume: true },
   say: { label: 'macOS Apple Speech', rate: true, pitch: false, volume: false },
   'espeak-ng': { label: 'espeak-ng', rate: true, pitch: true, volume: true },
   espeak: { label: 'espeak', rate: true, pitch: true, volume: true },
@@ -106,13 +108,15 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
       clearTimeout(timer);
       if (!res.ok) throw new Error(`bridge /ping → HTTP ${res.status}`);
       const info = (await res.json()) as {
-        ok?: boolean; platform?: string; engines?: Record<string, boolean>; voiceCount?: number;
+        ok?: boolean; platform?: string; engines?: Record<string, boolean>;
+        engineInfo?: OsTtsBridgeStatus['engineInfo']; voiceCount?: number;
       };
       const status: OsTtsBridgeStatus = {
         url,
         ok: !!info.ok,
         platform: info.platform,
         engines: info.engines as OsTtsBridgeStatus['engines'],
+        engineInfo: info.engineInfo,
         voiceCount: info.voiceCount,
       };
       let voices: OsTtsVoiceDef[] = [];
@@ -215,10 +219,12 @@ export function wavToAudioBuffer(buffer: ArrayBuffer): AudioBuffer {
 // ---------- synthesis ----------
 
 export interface OsSynthRequest {
-  /** Engine id ('sapi' | 'say' | 'espeak-ng' | 'espeak' | 'piper'). Omit → server picks the platform default. */
+  /** Engine id ('sapi' | 'winrt' | 'say' | 'espeak-ng' | 'espeak' | 'piper'). Omit → server picks the platform default. */
   engine?: OsTtsEngineId;
   /** Engine-specific voice name (server strips the `engine:` prefix). */
   voice?: string;
+  /** Piper only: absolute .onnx path — v5 bridges resolve it server-side even when omitted. */
+  modelPath?: string;
   text: string;
   /** Multiplier (1 = normal). */
   rate?: number;
@@ -253,7 +259,26 @@ export async function synthesizeViaBridge(req: OsSynthRequest, timeoutMs = 120_0
       throw new Error(msg);
     }
     const ab = await res.arrayBuffer();
-    return { buffer: wavToAudioBuffer(ab), engine: res.headers.get('X-OS-TTS-Engine') ?? undefined };
+    let buffer: AudioBuffer;
+    try {
+      buffer = wavToAudioBuffer(ab);
+    } catch {
+      // The engine emitted something the strict RIFF parser rejects (e.g. a
+      // different container) — let the browser's own decoder take a shot
+      // before giving up, so a rendering is never lost to a parsing detail.
+      const Ctor: typeof AudioContext | undefined =
+        typeof window !== 'undefined'
+          ? window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+          : undefined;
+      if (!Ctor) throw new Error('bridge returned audio the app could not decode');
+      const ctx = new Ctor();
+      try {
+        buffer = await ctx.decodeAudioData(ab);
+      } finally {
+        void ctx.close();
+      }
+    }
+    return { buffer, engine: res.headers.get('X-OS-TTS-Engine') ?? undefined };
   } finally {
     clearTimeout(timer);
   }
