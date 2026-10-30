@@ -397,6 +397,9 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
       continue;
     }
     let key = SINGLE[ch] ?? '';
+    // Word-final y is a vowel ("happy", "fly"); initial y is a consonant.
+    if (ch === 'y' && i === s.length - 1) key = vowelIndex === 0 ? 'AY' : 'IY';
+    else if (ch === 'y' && i > 0 && !/[aeiou]/.test(s[i - 1])) key = 'IH';
     if (ch === 'c' && /[eiy]/.test(s[i + 1] ?? '')) key = 'S';
     if (ch === 'g' && /[eiy]/.test(s[i + 1] ?? '')) key = 'JH';
     if (key) {
