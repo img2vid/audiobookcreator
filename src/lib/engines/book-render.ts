@@ -55,7 +55,9 @@ export async function renderBook(project: BookProject, opts: {
           });
           abort.signal.throwIfAborted();
           const buffer = await resampleBuffer(result.buffer, 22050, 1);
-          const samples = buffer.getChannelData(0), pcm = new Uint8Array(samples.length * 2), view = new DataView(pcm.buffer);
+          // Persist raw PCM as an ArrayBuffer: Safari/WebKit can abort IndexedDB
+          // transactions containing Blob values, even though WAV downloads support Blobs.
+          const samples = buffer.getChannelData(0), pcm = new ArrayBuffer(samples.length * 2), view = new DataView(pcm);
           for (let i = 0; i < samples.length; i++) {
             const x = Number.isFinite(samples[i]) ? Math.min(1, Math.max(-1, samples[i])) : 0;
             view.setInt16(i * 2, Math.round(x * (x < 0 ? 32768 : 32767)), true);
@@ -63,7 +65,7 @@ export async function renderBook(project: BookProject, opts: {
           abort.signal.throwIfAborted();
           label = result.engineLabel;
           await putBookChunk({ id, projectId: project.id, chapterId: chapter.id, index, signature,
-            pcm: new Blob([pcm]), frames: samples.length, sampleRate: 22050, engineLabel: label });
+            pcm, frames: samples.length, sampleRate: 22050, engineLabel: label });
         }
         done++; opts.onProgress({ done, total, reused, chapter: chapter.title, engineLabel: label });
         await new Promise<void>(resolve => setTimeout(resolve, 0));

@@ -15,11 +15,22 @@ export async function extractPdfText(buf: ArrayBuffer, onProgress?: (p: number) 
     for (let number = 1; number <= pdf.numPages; number++) {
       const page = await pdf.getPage(number);
       try {
-        const content = await page.getTextContent();
+        // Safari/WebKit's ReadableStream may not implement Symbol.asyncIterator.
+        // PDF.js getTextContent() uses for-await internally and throws there.
+        // Read the same ordered PDF.js text chunks through the portable reader API.
+        const reader = page.streamTextContent().getReader();
         let text = '';
-        for (const item of content.items) {
-          if (!('str' in item)) continue;
-          text += item.str + (item.hasEOL ? '\n' : ' ');
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            for (const item of value.items) {
+              if (!('str' in item)) continue;
+              text += item.str + (item.hasEOL ? '\n' : ' ');
+            }
+          }
+        } finally {
+          reader.releaseLock();
         }
         text = text.replace(/[ \t]+\n/g, '\n').trim();
         if (!text) empty++;

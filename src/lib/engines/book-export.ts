@@ -8,10 +8,11 @@ export async function chapterAudio(project: BookProject, chapterId: string): Pro
   const plan = splitBookText(chapter.text, project.chunkChars).filter(t => t.trim());
   const records = await chapterChunks(chapterId);
   if (!plan.length) throw new Error('This chapter is empty');
+  const pcmSize = (pcm: Blob | ArrayBuffer) => pcm instanceof Blob ? pcm.size : pcm.byteLength;
   const chunks = plan.map((text, index) => {
     const found = records.find(c => c.index === index && c.signature === renderSignature(project, text));
     if (!found) throw new Error('Render this chapter first. Some chunks are missing or were changed.');
-    if (found.sampleRate !== 22050 || found.pcm.size !== found.frames * 2) throw new Error('Invalid saved audio. Render this chapter again.');
+    if (found.sampleRate !== 22050 || pcmSize(found.pcm) !== found.frames * 2) throw new Error('Invalid saved audio. Render this chapter again.');
     return found;
   });
   let duration = 0;
@@ -20,7 +21,7 @@ export async function chapterAudio(project: BookProject, chapterId: string): Pro
     const start = duration; duration += c.frames / c.sampleRate;
     vtt.push(String(i + 1), `${vttTime(start)} --> ${vttTime(duration)}`, plan[i].trim().replace(/-->/g, '→').replace(/\n\s*\n/g, '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;'), '');
   });
-  const size = chunks.reduce((n, c) => n + c.pcm.size, 0);
+  const size = chunks.reduce((n, c) => n + pcmSize(c.pcm), 0);
   const blob = new Blob([wavHeader(size) as BlobPart, ...chunks.map(c => c.pcm)], { type: 'audio/wav' });
   const number = String(project.chapters.indexOf(chapter) + 1).padStart(4, '0');
   return { blob, duration, vtt: vtt.join('\n'), name: `${number}-${safeBookName(chapter.title)}` };
