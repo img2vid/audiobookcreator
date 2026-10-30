@@ -50,7 +50,7 @@ setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?1
   const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: port, PATH: dir + path.delimiter + process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = ''; child.stdout.on('data', d => { logs += d; }); child.stderr.on('data', d => { logs += d; });
   const url = `http://127.0.0.1:${port}`;
-  const post = body => fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body) });
+  const post = (body, options = {}) => fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body), ...options });
   try {
     let ready = false;
     for (let i = 0; i < 120; i++) { try { const r = await fetch(`${url}/ping`); if (r.ok) { ready = true; break; } } catch {} await new Promise(r => setTimeout(r, 50)); }
@@ -60,7 +60,8 @@ setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?1
     assert.equal((await post('{')).status, 400);
     assert.equal((await post({ text: 'test', volume: 4 })).status, 400);
     assert.equal((await post({ text: 'test', engine: 'fake-engine' })).status, 400);
-    assert.equal((await post({ text: 'a'.repeat(25001) })).status, 413);
+    // Invalid input must fail promptly even while Windows voice discovery is running.
+    assert.equal((await post({ text: 'a'.repeat(25001) }, { signal: AbortSignal.timeout(5000) })).status, 413);
     if (process.platform !== 'win32') {
       await fetch(`${url}/voices`);
       const audio = await post({ engine: 'espeak-ng', voice: 'Fixture', text: 'hello' }); assert.equal(audio.status, 200); assert.equal((await audio.arrayBuffer()).byteLength, 444);
@@ -73,7 +74,15 @@ setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?1
       for (let i = 0; i < 50; i++) { await new Promise(r => setTimeout(r, 50)); retried = await post({ engine: 'espeak-ng', text: 'hello' }); if (retried.status !== 429) break; }
       assert.equal(retried.status, 200);
     }
-  } finally { child.kill(); await once(child, 'exit'); fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    // Subscribe before killing, and never wait for an exit event already emitted.
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit');
+      child.kill();
+      await exited;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('FFmpeg exporter uses actual sample duration and rejects escaping inputs', () => {
