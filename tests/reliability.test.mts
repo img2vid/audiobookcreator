@@ -9,6 +9,7 @@ import { parseWav } from '@/lib/engines/os-tts-bridge';
 import { saveBook, getBook, bookChunkId, putBookChunk, bookChunkInfo, claimBook, releaseBook, deleteBook } from '@/lib/engines/book-db';
 import { chapterAudio, bookPackage } from '@/lib/engines/book-export';
 import { autoTune } from '@/lib/engines/autotune';
+import { normalizeText, phonemesForWord, VOICE_PROFILES } from '@/lib/engines/formant';
 
 function ab(a: Uint8Array): ArrayBuffer { return a.slice().buffer; }
 async function collect(stream: AsyncIterable<Uint8Array>): Promise<ArrayBuffer> {
@@ -124,4 +125,34 @@ test('queue serializes tasks, cancellation stays cancelled, and active jobs cann
   await waitFor(() => useAppStore.getState().jobs.find(j => j.id === second)?.status === 'done');
   assert.equal(useAppStore.getState().jobs.find(j => j.id === first)?.status, 'cancelled');
   assert.deepEqual(order, ['first', 'second']);
+});
+
+test('offline pronunciation regressions: irregulars, silent letters, magic-e and suffixes', () => {
+  const word = (s: string) => phonemesForWord(s).join(' ');
+  assert.equal(word('work'), 'W ER K');
+  assert.equal(word('robot'), 'R OW B AA T');
+  assert.equal(word('thoroughly'), 'TH ER OW L IY');
+  assert.equal(word('home'), 'HH OW M');
+  assert.equal(word('making'), 'M EY K IH NG');
+  assert.equal(word('happy'), 'HH AE P IY');
+  assert.equal(word('city'), 'S IH T IY');
+  assert.equal(word('action'), 'AE K SH AH N');
+  assert.equal(word('woman'), 'W UH M AH N');
+  assert.equal(word('queue'), 'K Y UW');
+  assert.ok(VOICE_PROFILES.find(v => v.id === 'chip-robotic')!.timbre > 0.95);
+  assert.equal(normalizeText('Dr. Stone met Mr. Jones at 3:30.'), 'doctor Stone met mister Jones at three thirty.');
+});
+
+test('OS voice auto-picking prioritizes quality and refuses unrelated languages', async () => {
+  const { pickOsVoiceForProfile } = await import('@/lib/engines/dispatch');
+  const voices = [
+    { id: 'espeak-ng:weak', engine: 'espeak-ng', name: 'weak', lang: 'en-US', gender: 'female', neural: false, quality: 1 },
+    { id: 'piper:clear', engine: 'piper', name: 'clear', lang: 'en-US', gender: 'female', neural: true, quality: 5 },
+    { id: 'say:ja', engine: 'say', name: 'ja', lang: 'ja-JP', gender: 'female', neural: false, quality: 3 },
+  ];
+  for (const profile of ['aura-bright', 'nova-narrator', 'junior']) {
+    assert.equal(pickOsVoiceForProfile(voices as any, profile, 'female', 'en')?.name, 'clear');
+    assert.equal(pickOsVoiceForProfile(voices as any, profile, 'female', 'ja')?.name, 'ja');
+  }
+  assert.equal(pickOsVoiceForProfile(voices as any, 'any', 'female', 'fr'), undefined);
 });

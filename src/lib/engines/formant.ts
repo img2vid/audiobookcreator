@@ -21,6 +21,7 @@
 //     master bus; raised-cosine envelopes instead of linear trapezoids.
 // ============================================================
 import type { SynthOptions, VoiceProfileDef } from '@/lib/types';
+import { lookupEnglishPronunciation } from './english-phonetics';
 import { concatenateBuffers } from '@/lib/engines/dsp';
 import { yieldToUI } from '@/lib/utils/async';
 
@@ -32,7 +33,7 @@ export const VOICE_PROFILES: VoiceProfileDef[] = [
   { id: 'aura-bright', name: 'Aura Bright', gender: 'female', basePitchHz: 214, timbre: 1.1, breath: 0.2, lang: 'en', description: 'Clear female voice with bright formants.' },
   { id: 'atlas-narrator', name: 'Atlas Narrator', gender: 'male', basePitchHz: 116, timbre: 0.96, breath: 0.15, lang: 'en', description: 'Deep audiobook narrator, deliberate pace.' },
   { id: 'nova-narrator', name: 'Nova Narrator', gender: 'female', basePitchHz: 196, timbre: 1.08, breath: 0.16, lang: 'en', description: 'Smooth female narrator for long-form audio.' },
-  { id: 'chip-robotic', name: 'Chip (Robotic)', gender: 'neutral', basePitchHz: 148, timbre: 0.82, breath: 0.04, lang: 'en', description: 'Retro robotic voice — minimal breath, flat contour.' },
+  { id: 'chip-robotic', name: 'Chip (Robotic)', gender: 'neutral', basePitchHz: 148, timbre: 0.98, breath: 0.02, lang: 'en', description: 'Intelligible, deliberately monotone robotic voice; clear consonants and flat pitch.' },
   { id: 'whisper-soft', name: 'Whisper Soft', gender: 'neutral', basePitchHz: 158, timbre: 1.02, breath: 0.85, lang: 'en', description: 'Airy whispered delivery, very low volume.' },
   { id: 'storyteller', name: 'Storyteller', gender: 'male', basePitchHz: 132, timbre: 0.99, breath: 0.2, lang: 'en', description: 'Expressive storyteller with rich pitch movement.' },
   { id: 'junior', name: 'Junior', gender: 'neutral', basePitchHz: 250, timbre: 1.18, breath: 0.24, lang: 'en', description: 'Child-like high voice.' },
@@ -218,7 +219,7 @@ const EXCEPTIONS: Record<string, string> = {
   friend: 'F R EH N D', great: 'G R EY T', break: 'B R EY K', steak: 'S T EY K',
   heart: 'HH AA R T', hear: 'HH IY R', here: 'HH IY R', near: 'N IY R',
   year: 'Y IH R', years: 'Y IH R Z', word: 'W ER D', words: 'W ER D Z',
-  work: 'W ER D', works: 'W ER D S', world: 'W ER L D', many: 'M EH N IY',
+  work: 'W ER K', works: 'W ER K S', world: 'W ER L D', many: 'M EH N IY',
   any: 'EH N IY', very: 'V EH R IY', every: 'EH V R IY', only: 'OW N L IY',
   other: 'AH DH ER', another: 'AH N AH DH ER', mother: 'M AH DH ER',
   father: 'F AA DH ER', brother: 'B R AH DH ER', water: 'W AO T ER',
@@ -265,7 +266,7 @@ export function normalizeText(input: string): string {
   t = t.replace(/\bhttps?:\/\/\S+/g, ' web address ');
   // abbreviations (case-insensitive, word boundary)
   for (const [k, v] of Object.entries(ABBREV)) {
-    const re = new RegExp(k.replace('.', '\\.') + '\\b', 'gi');
+    const re = new RegExp('\\b' + k.replace(/\./g, '\\.') + '(?!\\w)', 'gi');
     t = t.replace(re, v);
   }
   // times 3:30 → three thirty (12h assumption)
@@ -327,11 +328,39 @@ const SINGLE: Record<string, string> = {
 
 const VOWELS = new Set(['AA', 'AE', 'AH', 'AO', 'EH', 'ER', 'IH', 'IY', 'UH', 'UW', 'AY', 'EY', 'OW', 'AW', 'OY']);
 
+const REDUCED_WORDS = new Set(['the', 'and', 'or', 'to', 'of', 'a', 'an', 'at', 'as', 'for', 'with',
+  'is', 'are', 'was', 'were', 'have', 'has', 'had', 'you', 'your', 'they', 'them', 'from', 'in', 'on',
+  'it', 'its', 'this', 'that', 'be', 'been', 'do', 'does', 'but', 'so', 'if', 'we', 'he', 'she']);
+
 function wordToPhones(wordRaw: string): PhoneTok[] {
   const w = wordRaw.toLowerCase().replace(/[^a-z']/g, '');
   if (!w) return [];
-  if (EXCEPTIONS[w]) {
-    return EXCEPTIONS[w].split(' ').filter(Boolean).map((k) => ({ key: k, stress: false }));
+  const dictionary = lookupEnglishPronunciation(w) ?? EXCEPTIONS[w];
+  if (dictionary) {
+    let accented = false;
+    return dictionary.split(/\s+/).filter(k => P[k]).map((key) => {
+      const stress = !accented && w.length > 3 && !REDUCED_WORDS.has(w) && VOWELS.has(key);
+      if (stress) accented = true;
+      return { key, stress };
+    });
+  }
+  // Common productive suffixes are phonemes, not independent letter sounds.
+  // Split only longer words to avoid corrupting roots such as "sing" and "thing".
+  const append = (stem: string, suffix: string): PhoneTok[] =>
+    [...wordToPhones(stem), ...suffix.split(' ').map(key => ({ key, stress: false }))];
+  if (w.length >= 6 && w.endsWith('tion')) return append(w.slice(0, -4), 'SH AH N');
+  if (w.length >= 6 && w.endsWith('sion')) return append(w.slice(0, -4), 'ZH AH N');
+  if (w.length >= 6 && w.endsWith('ture')) return append(w.slice(0, -4), 'CH ER');
+  if (w.length > 5 && w.endsWith('ing')) {
+    let stem = w.slice(0, -3);
+    if (/([^aeiou])\1$/.test(stem)) stem = stem.slice(0, -1);
+    if (/[^aeiou][aeiou][^aeiou]$/.test(stem) && /[aeiou]k$/.test(stem)) stem += 'e';
+    return append(stem, 'IH NG');
+  }
+  if (w.length > 4 && w.endsWith('ed')) {
+    const stem = w.slice(0, -2);
+    const suffix = /[td]$/.test(stem) ? 'IH D' : /(?:[pkfsx]|sh|ch)$/.test(stem) ? 'T' : 'D';
+    return append(stem, suffix);
   }
   // magic-e: silent final e after consonant, making preceding vowel long
   let s = w.replace(/'/g, '');
@@ -349,7 +378,7 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
           const isVowel = VOWELS.has(k);
           if (isVowel) {
             // long vowel for magic-e or double vowel digraphs
-            const longKey: Record<string, string> = { AE: 'EY', EH: 'EY', IH: 'AY', AA: 'EY', AH: 'EY' };
+            const longKey: Record<string, string> = { AE: 'EY', EH: 'IY', IH: 'AY', AA: 'OW', AH: 'UW' };
             const key = magicE && longKey[k] ? longKey[k] : k;
             toks.push({ key, stress: vowelIndex === 0 && s.length > 3 });
             vowelIndex++;
@@ -368,10 +397,15 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
       continue;
     }
     let key = SINGLE[ch] ?? '';
+    // Word-final y is a vowel ("happy", "fly"); initial y is a consonant.
+    if (ch === 'y' && i === s.length - 1) key = vowelIndex === 0 ? 'AY' : 'IY';
+    else if (ch === 'y' && i > 0 && !/[aeiou]/.test(s[i - 1])) key = 'IH';
+    if (ch === 'c' && /[eiy]/.test(s[i + 1] ?? '')) key = 'S';
+    if (ch === 'g' && /[eiy]/.test(s[i + 1] ?? '')) key = 'JH';
     if (key) {
       if (VOWELS.has(key)) {
         if (magicE) {
-          const longKey: Record<string, string> = { AE: 'EY', EH: 'EY', IH: 'AY', AA: 'EY', AH: 'EY' };
+          const longKey: Record<string, string> = { AE: 'EY', EH: 'IY', IH: 'AY', AA: 'OW', AH: 'UW' };
           key = longKey[key] ?? key;
         }
         toks.push({ key, stress: vowelIndex === 0 && s.length > 3 });
@@ -385,6 +419,11 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
     i++;
   }
   return toks.filter((t) => P[t.key]);
+}
+
+/** Small, deterministic pronunciation inspector used by offline regression tests. */
+export function phonemesForWord(word: string): string[] {
+  return wordToPhones(word).map(tok => tok.key);
 }
 // ---------- deterministic seeded RNG (natural, reproducible variation) ----------
 export function hashString(s: string): number {
@@ -428,6 +467,8 @@ interface ScheduledPhone {
   enter: [number, number, number] | null; // coarticulation entry (previous target)
   exit: [number, number, number] | null; // anticipatory target (next vowel)
   nasal: boolean;
+  linkedPrev?: boolean;
+  linkedNext?: boolean;
 }
 
 export type { ScheduledPhone };
@@ -549,6 +590,9 @@ function planSentence(
   // --- pass 4: coarticulation — formants glide instead of stepping ---
   for (let i = 0; i < phones.length; i++) {
     const ph = phones[i];
+    // Maintain syllable continuity instead of fading every voiced phone to silence.
+    ph.linkedPrev = i > 0 && wordOf[i] === wordOf[i - 1] && isVoicedType(ph.def.type) && isVoicedType(phones[i - 1].def.type);
+    ph.linkedNext = i + 1 < phones.length && wordOf[i] === wordOf[i + 1] && isVoicedType(ph.def.type) && isVoicedType(phones[i + 1].def.type);
     if (!ph.formants) continue;
     const prev = i > 0 ? phones[i - 1] : null;
     if (prev && prev.formants && differs3(prev.formants, ph.formants)) ph.enter = prev.formants;
@@ -597,11 +641,13 @@ function formantCurve(ph: ScheduledPhone, fi: number): Float32Array | null {
 }
 
 /** Raised-cosine attack / plateau / release envelope — click-free by construction. */
-function phoneEnvelope(dur: number, gain: number): Float32Array {
+function phoneEnvelope(dur: number, gain: number, linkedPrev = false, linkedNext = false): Float32Array {
   const K = 24;
   const arr = new Float32Array(K);
-  const atkEnd = Math.min(0.3, 0.024 / Math.max(0.02, dur));
-  const relStart = 1 - Math.min(0.38, 0.032 / Math.max(0.02, dur));
+  // A full 24/32ms attack/release PER phone created audible syllable gaps.
+  // Keep brief anti-click ramps; connected vowels/liquids get even shorter ramps.
+  const atkEnd = Math.min(0.24, (linkedPrev ? 0.004 : 0.011) / Math.max(0.02, dur));
+  const relStart = 1 - Math.min(0.3, (linkedNext ? 0.005 : 0.014) / Math.max(0.02, dur));
   for (let k = 0; k < K; k++) {
     const u = k / (K - 1);
     let a: number;
@@ -665,8 +711,8 @@ function noiseBuffer(ctx: BaseAudioContext): AudioBuffer {
   const d = buf.getChannelData(0);
   let s = 987654321;
   for (let i = 0; i < len; i++) {
-    s = (s * 1664525 + 1013904223) & 0x7fffffff;
-    d[i] = (s / 0x7fffffff) * 2 - 1;
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    d[i] = (s / 0xffffffff) * 2 - 1;
   }
   return buf;
 }
@@ -721,8 +767,8 @@ export function buildGlottalBuffer(
 
   // Human voices are never perfectly periodic: jitter (F0), shimmer (amp),
   // vibrato and slow drift break the machine-like regularity.
-  const jitterAmt = flat ? 0.012 : 0.055; // AR(1) walk → ~1–2.5 % cycle-to-cycle
-  const shimmerAmt = flat ? 0.01 : 0.032;
+  const jitterAmt = flat ? 0.003 : 0.028; // AR(1) walk → ~1–2.5 % cycle-to-cycle
+  const shimmerAmt = flat ? 0.004 : 0.022;
   const vibDepth = flat ? 0 : 0.0052;
   const driftDepth = flat ? 0 : 0.004;
   const vibHz = 4.4 + rng() * 0.9;
@@ -828,7 +874,7 @@ function renderSentence(
 
     if (voiced && ph.formants) {
       const env = ctx.createGain();
-      env.gain.setValueCurveAtTime(phoneEnvelope(dur, ph.gain), t0, dur);
+      env.gain.setValueCurveAtTime(phoneEnvelope(dur, ph.gain, ph.linkedPrev, ph.linkedNext), t0, dur);
 
       // excitation: continuous glottal slice (phase-true across phones)
       const src = ctx.createBufferSource();
