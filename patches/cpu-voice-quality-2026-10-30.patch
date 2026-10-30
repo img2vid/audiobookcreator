@@ -1,0 +1,404 @@
+diff --git a/src/lib/engines/dispatch.ts b/src/lib/engines/dispatch.ts
+index 10a72f6..6831b71 100644
+--- a/src/lib/engines/dispatch.ts
++++ b/src/lib/engines/dispatch.ts
+@@ -32,6 +32,7 @@ import { allVoiceProfiles, hashString } from '@/lib/engines/formant';
+ import { OS_ENGINE_CAPS, probeOsTtsBridge, synthesizeViaBridge } from '@/lib/engines/os-tts-bridge';
+ import { prepareTextForNeuralSpeech, splitIntoChunks } from '@/lib/engines/speech';
+ import { parseVoiceMarkup } from '@/lib/engines/markup';
++import { resampleBuffer } from '@/lib/engines/encode';
+ 
+ /** Engine priority when auto-picking a bridge voice (realism first). */
+ const ENGINE_PRIORITY: Record<OsTtsEngineId, number> = {
+@@ -80,15 +81,20 @@ export function pickOsVoiceForProfile(
+   const sorted = sortOsVoices(voices, langPrefix);
+   const language = langPrefix?.split(/[-_]/)[0].toLowerCase();
+   const matching = language ? sorted.filter(v => v.lang.toLowerCase().split(/[-_]/)[0] === language) : [];
++  // Never assign an unrelated-language voice and present gibberish as correct speech.
++  if (language && !matching.length) return undefined;
+   const ranked = matching.length ? matching : sorted;
+   const withGender = ranked.filter((v) => v.gender);
+   const pool = gender && gender !== 'neutral' && withGender.length
+     ? ranked.filter((v) => v.gender === gender)
+     : ranked;
+   const candidates = pool.length ? pool : ranked;
+-  // stable per-profile index → deterministic, distinct voice assignments
+-  const idx = candidates.length === 1 ? 0 : hashString(profileId || 'default') % candidates.length;
+-  return candidates[idx];
++  // Rank first, diversify second. Previously a random hash could select a weak
++  // eSpeak voice even when high-quality Piper or OS natural voices were present.
++  const best = Math.max(...candidates.map(rankOsVoice));
++  const highQuality = candidates.filter(v => rankOsVoice(v) >= best - 10);
++  const idx = highQuality.length === 1 ? 0 : hashString(profileId || 'default') % highQuality.length;
++  return highQuality[idx];
+ }
+ 
+ // ---------- OS render planning (markup-aware chunking) ----------
+@@ -268,8 +274,7 @@ async function renderViaOsBridge(
+     const profile = allVoiceProfiles().find((p) => p.id === opts.profileId);
+     voice = pickOsVoiceForProfile(candidates, opts.profileId, profile?.gender, opts.lang ?? 'en');
+   }
+-  if (!voice) voice = sortOsVoices(bridgeVoices)[0];
+-  if (!voice) throw new Error('No OS voices available');
++  if (!voice) throw new Error(`No installed OS voice matches the requested language (${opts.lang ?? 'en'}). Install a voice for that language or choose one explicitly.`);
+ 
+   const engine = voice.engine as OsTtsEngineId;
+   // Unknown engine ids must NEVER crash a render (a NEW bridge can list
+@@ -318,11 +323,15 @@ async function renderViaOsBridge(
+       pitch: caps.pitch ? c.pitch : undefined,
+       volume: caps.volume ? c.volume : undefined,
+     }, 120_000, opts.signal);
+-    // engines without volume control get the gain applied here
+-    if (!caps.volume) applyGainInPlace(res.buffer, c.volume);
+-    buffers.push(res.buffer);
+-    sampleRate = sampleRate || res.buffer.sampleRate;
+-    channels = Math.max(channels, res.buffer.numberOfChannels);
++    // Bridge engines may emit WAVs with different native sample rates.
++    // Normalize before concatenation or duration and pitch will be distorted.
++    const outputRate = sampleRate || res.buffer.sampleRate;
++    const normalized = res.buffer.sampleRate === outputRate
++      ? res.buffer : await resampleBuffer(res.buffer, outputRate);
++    if (!caps.volume) applyGainInPlace(normalized, c.volume);
++    buffers.push(normalized);
++    sampleRate = outputRate;
++    channels = Math.max(channels, normalized.numberOfChannels);
+     if (c.pauseAfterMs > 0) {
+       buffers.push(silenceBuffer(c.pauseAfterMs / 1000, sampleRate, channels));
+     } else if (i < chunks.length - 1) {
+diff --git a/src/lib/engines/english-phonetics.ts b/src/lib/engines/english-phonetics.ts
+new file mode 100644
+index 0000000..9f20e76
+--- /dev/null
++++ b/src/lib/engines/english-phonetics.ts
+@@ -0,0 +1,99 @@
++/**
++ * High-frequency corrections for the tiny, CPU-only English G2P fallback.
++ * All entries use the phone inventory in formant.ts (ARPABET without stress digits).
++ * This lexicon is intentionally local: no network, model download, or GPU.
++ * It is not a substitute for a complete pronunciation dictionary, and proper
++ * names remain user-editable via the application pronunciation lexicon.
++ */
++export const ENGLISH_PRONUNCIATIONS: Readonly<Record<string, string>> = Object.freeze({
++  work: 'W ER K', works: 'W ER K S', worker: 'W ER K ER', working: 'W ER K IH NG',
++  book: 'B UH K', books: 'B UH K S', audiobook: 'AO D IY OW B UH K',
++  audio: 'AO D IY OW', voice: 'V OY S', voices: 'V OY S IH Z',
++  speak: 'S P IY K', speaking: 'S P IY K IH NG', speech: 'S P IY CH',
++  speaker: 'S P IY K ER', spoken: 'S P OW K AH N', sound: 'S AW N D',
++  sounds: 'S AW N D Z', pronounce: 'P R AH N AW N S',
++  pronunciation: 'P R AH N AH N S IY EY SH AH N', phoneme: 'F OW N IY M',
++  phonemes: 'F OW N IY M Z', consonant: 'K AA N S AH N AH N T',
++  vowel: 'V AW AH L', syllable: 'S IH L AH B AH L',
++  robot: 'R OW B AA T', robotic: 'R OW B AA T IH K',
++  human: 'HH Y UW M AH N', natural: 'N AE CH ER AH L',
++  naturally: 'N AE CH ER AH L IY', realistic: 'R IY AH L IH S T IH K',
++  different: 'D IH F ER AH N T', difference: 'D IH F ER AH N S',
++  correct: 'K ER EH K T', correctly: 'K ER EH K T L IY',
++  accurate: 'AE K Y ER AH T', accuracy: 'AE K Y ER AH S IY',
++  beautiful: 'B Y UW T AH F AH L', comfortable: 'K AH M F T ER B AH L',
++  interesting: 'IH N T R AH S T IH NG', difficult: 'D IH F IH K AH L T',
++  important: 'IH M P AO R T AH N T', intelligent: 'IH N T EH L AH JH AH N T',
++  possible: 'P AA S AH B AH L', available: 'AH V EY L AH B AH L',
++  local: 'L OW K AH L', offline: 'AO F L AY N',
++  machine: 'M AH SH IY N', computer: 'K AH M P Y UW T ER',
++  processor: 'P R AA S EH S ER', digital: 'D IH JH IH T AH L',
++  chapter: 'CH AE P T ER', chapters: 'CH AE P T ER Z',
++  story: 'S T AO R IY', stories: 'S T AO R IY Z',
++  narrator: 'N AE R EY T ER', narration: 'N AE R EY SH AH N',
++  reader: 'R IY D ER', reading: 'R IY D IH NG',
++  written: 'R IH T AH N', writing: 'R AY T IH NG',
++  sentence: 'S EH N T AH N S', sentences: 'S EH N T AH N S AH Z',
++  example: 'IH G Z AE M P AH L', examples: 'IH G Z AE M P AH L Z',
++  language: 'L AE NG G W IH JH', languages: 'L AE NG G W IH JH IH Z',
++  english: 'IH NG G L IH SH', american: 'AH M EH R AH K AH N',
++  hello: 'HH AH L OW', welcome: 'W EH L K AH M',
++  everyone: 'EH V R IY W AH N', everything: 'EH V R IY TH IH NG',
++  something: 'S AH M TH IH NG', nothing: 'N AH TH IH NG',
++  always: 'AO L W EY Z', usually: 'Y UW ZH UW AH L IY',
++  actually: 'AE K CH UW AH L IY', especially: 'IH S P EH SH AH L IY',
++  probably: 'P R AA B AH B L IY', finally: 'F AY N AH L IY',
++  school: 'S K UW L', teacher: 'T IY CH ER', student: 'S T UW D AH N T',
++  students: 'S T UW D AH N T S', education: 'EH JH UW K EY SH AH N',
++  science: 'S AY AH N S', scientific: 'S AY AH N T IH F IH K',
++  character: 'K EH R AH K T ER', characters: 'K EH R AH K T ER Z',
++  children: 'CH IH L D R AH N', child: 'CH AY L D',
++  woman: 'W UH M AH N', women: 'W IH M IH N',
++  family: 'F AE M AH L IY', business: 'B IH Z N AH S',
++  answer: 'AE N S ER', question: 'K W EH S CH AH N',
++  knowledge: 'N AA L IH JH', knowable: 'N OW AH B AH L',
++  queue: 'K Y UW', queued: 'K Y UW D',
++  island: 'AY L AH N D', salmon: 'S AE M AH N',
++  colonel: 'K ER N AH L', honest: 'AA N AH S T',
++  hour: 'AW ER', hours: 'AW ER Z', honor: 'AA N ER',
++  debt: 'D EH T', doubt: 'D AW T', subtle: 'S AH T AH L',
++  receipt: 'R IH S IY T', plumber: 'P L AH M ER',
++  knight: 'N AY T', knife: 'N AY F', knee: 'N IY',
++  write: 'R AY T', wrong: 'R AO NG', wrist: 'R IH S T',
++  listen: 'L IH S AH N', often: 'AO F AH N',
++  thought: 'TH AO T', though: 'DH OW', through: 'TH R UW',
++  thorough: 'TH ER OW', thoroughly: 'TH ER OW L IY',
++  tough: 'T AH F', rough: 'R AH F', cough: 'K AO F',
++  bough: 'B AW', bought: 'B AO T', brought: 'B R AO T',
++  daughter: 'D AO T ER', laughter: 'L AE F T ER',
++  enough: 'IH N AH F', eight: 'EY T', height: 'HH AY T',
++  weight: 'W EY T', neighbor: 'N EY B ER',
++  friend: 'F R EH N D', friends: 'F R EH N D Z',
++  people: 'P IY P AH L', again: 'AH G EH N',
++  zero: 'Z IH R OW', minute: 'M IH N AH T', minutes: 'M IH N AH T S',
++  second: 'S EH K AH N D', seconds: 'S EH K AH N D Z',
++  today: 'T AH D EY', tomorrow: 'T AH M AA R OW',
++  yesterday: 'Y EH S T ER D EY', january: 'JH AE N Y UW EH R IY',
++  february: 'F EH B R UW EH R IY', wednesday: 'W EH N Z D EY',
++  tuesday: 'T UW Z D EY', thursday: 'TH ER Z D EY',
++  sunday: 'S AH N D EY', saturday: 'S AE T ER D EY',
++  pizza: 'P IY T S AH', chocolate: 'CH AO K L AH T',
++  sugar: 'SH UH G ER', ocean: 'OW SH AH N',
++  nation: 'N EY SH AH N', station: 'S T EY SH AH N',
++  vision: 'V IH ZH AH N', television: 'T EH L AH V IH ZH AH N',
++  tension: 'T EH N SH AH N', attention: 'AH T EH N SH AH N',
++  picture: 'P IH K CH ER', future: 'F Y UW CH ER',
++  nature: 'N EY CH ER', culture: 'K AH L CH ER',
++  music: 'M Y UW Z IH K', musical: 'M Y UW Z IH K AH L',
++  volume: 'V AA L Y UW M', button: 'B AH T AH N',
++  system: 'S IH S T AH M', systems: 'S IH S T AH M Z',
++  browser: 'B R AW Z ER', browsers: 'B R AW Z ER Z',
++  javascript: 'JH AA V AH S K R IH P T',
++  github: 'G IH T HH AH B', linux: 'L IH N AH K S',
++  windows: 'W IH N D OW Z', python: 'P AY TH AA N',
++  webkit: 'W EH B K IH T', neural: 'N UW R AH L',
++});
++/** Return a known high-frequency pronunciation, if one exists. */
++export function lookupEnglishPronunciation(word: string): string | undefined {
++  return ENGLISH_PRONUNCIATIONS[word.toLowerCase()];
++}
+diff --git a/src/lib/engines/formant.ts b/src/lib/engines/formant.ts
+index e7c3590..b9ebfc5 100644
+--- a/src/lib/engines/formant.ts
++++ b/src/lib/engines/formant.ts
+@@ -21,6 +21,7 @@
+ //     master bus; raised-cosine envelopes instead of linear trapezoids.
+ // ============================================================
+ import type { SynthOptions, VoiceProfileDef } from '@/lib/types';
++import { lookupEnglishPronunciation } from './english-phonetics';
+ import { concatenateBuffers } from '@/lib/engines/dsp';
+ import { yieldToUI } from '@/lib/utils/async';
+ 
+@@ -32,7 +33,7 @@ export const VOICE_PROFILES: VoiceProfileDef[] = [
+   { id: 'aura-bright', name: 'Aura Bright', gender: 'female', basePitchHz: 214, timbre: 1.1, breath: 0.2, lang: 'en', description: 'Clear female voice with bright formants.' },
+   { id: 'atlas-narrator', name: 'Atlas Narrator', gender: 'male', basePitchHz: 116, timbre: 0.96, breath: 0.15, lang: 'en', description: 'Deep audiobook narrator, deliberate pace.' },
+   { id: 'nova-narrator', name: 'Nova Narrator', gender: 'female', basePitchHz: 196, timbre: 1.08, breath: 0.16, lang: 'en', description: 'Smooth female narrator for long-form audio.' },
+-  { id: 'chip-robotic', name: 'Chip (Robotic)', gender: 'neutral', basePitchHz: 148, timbre: 0.82, breath: 0.04, lang: 'en', description: 'Retro robotic voice — minimal breath, flat contour.' },
++  { id: 'chip-robotic', name: 'Chip (Robotic)', gender: 'neutral', basePitchHz: 148, timbre: 0.98, breath: 0.02, lang: 'en', description: 'Intelligible, deliberately monotone robotic voice; clear consonants and flat pitch.' },
+   { id: 'whisper-soft', name: 'Whisper Soft', gender: 'neutral', basePitchHz: 158, timbre: 1.02, breath: 0.85, lang: 'en', description: 'Airy whispered delivery, very low volume.' },
+   { id: 'storyteller', name: 'Storyteller', gender: 'male', basePitchHz: 132, timbre: 0.99, breath: 0.2, lang: 'en', description: 'Expressive storyteller with rich pitch movement.' },
+   { id: 'junior', name: 'Junior', gender: 'neutral', basePitchHz: 250, timbre: 1.18, breath: 0.24, lang: 'en', description: 'Child-like high voice.' },
+@@ -218,7 +219,7 @@ const EXCEPTIONS: Record<string, string> = {
+   friend: 'F R EH N D', great: 'G R EY T', break: 'B R EY K', steak: 'S T EY K',
+   heart: 'HH AA R T', hear: 'HH IY R', here: 'HH IY R', near: 'N IY R',
+   year: 'Y IH R', years: 'Y IH R Z', word: 'W ER D', words: 'W ER D Z',
+-  work: 'W ER D', works: 'W ER D S', world: 'W ER L D', many: 'M EH N IY',
++  work: 'W ER K', works: 'W ER K S', world: 'W ER L D', many: 'M EH N IY',
+   any: 'EH N IY', very: 'V EH R IY', every: 'EH V R IY', only: 'OW N L IY',
+   other: 'AH DH ER', another: 'AH N AH DH ER', mother: 'M AH DH ER',
+   father: 'F AA DH ER', brother: 'B R AH DH ER', water: 'W AO T ER',
+@@ -265,7 +266,7 @@ export function normalizeText(input: string): string {
+   t = t.replace(/\bhttps?:\/\/\S+/g, ' web address ');
+   // abbreviations (case-insensitive, word boundary)
+   for (const [k, v] of Object.entries(ABBREV)) {
+-    const re = new RegExp(k.replace('.', '\\.') + '\\b', 'gi');
++    const re = new RegExp('\\b' + k.replace(/\./g, '\\.') + '(?!\\w)', 'gi');
+     t = t.replace(re, v);
+   }
+   // times 3:30 → three thirty (12h assumption)
+@@ -327,11 +328,39 @@ const SINGLE: Record<string, string> = {
+ 
+ const VOWELS = new Set(['AA', 'AE', 'AH', 'AO', 'EH', 'ER', 'IH', 'IY', 'UH', 'UW', 'AY', 'EY', 'OW', 'AW', 'OY']);
+ 
++const REDUCED_WORDS = new Set(['the', 'and', 'or', 'to', 'of', 'a', 'an', 'at', 'as', 'for', 'with',
++  'is', 'are', 'was', 'were', 'have', 'has', 'had', 'you', 'your', 'they', 'them', 'from', 'in', 'on',
++  'it', 'its', 'this', 'that', 'be', 'been', 'do', 'does', 'but', 'so', 'if', 'we', 'he', 'she']);
++
+ function wordToPhones(wordRaw: string): PhoneTok[] {
+   const w = wordRaw.toLowerCase().replace(/[^a-z']/g, '');
+   if (!w) return [];
+-  if (EXCEPTIONS[w]) {
+-    return EXCEPTIONS[w].split(' ').filter(Boolean).map((k) => ({ key: k, stress: false }));
++  const dictionary = lookupEnglishPronunciation(w) ?? EXCEPTIONS[w];
++  if (dictionary) {
++    let accented = false;
++    return dictionary.split(/\s+/).filter(k => P[k]).map((key) => {
++      const stress = !accented && w.length > 3 && !REDUCED_WORDS.has(w) && VOWELS.has(key);
++      if (stress) accented = true;
++      return { key, stress };
++    });
++  }
++  // Common productive suffixes are phonemes, not independent letter sounds.
++  // Split only longer words to avoid corrupting roots such as "sing" and "thing".
++  const append = (stem: string, suffix: string): PhoneTok[] =>
++    [...wordToPhones(stem), ...suffix.split(' ').map(key => ({ key, stress: false }))];
++  if (w.length >= 6 && w.endsWith('tion')) return append(w.slice(0, -4), 'SH AH N');
++  if (w.length >= 6 && w.endsWith('sion')) return append(w.slice(0, -4), 'ZH AH N');
++  if (w.length >= 6 && w.endsWith('ture')) return append(w.slice(0, -4), 'CH ER');
++  if (w.length > 5 && w.endsWith('ing')) {
++    let stem = w.slice(0, -3);
++    if (/([^aeiou])\1$/.test(stem)) stem = stem.slice(0, -1);
++    if (/[^aeiou][aeiou][^aeiou]$/.test(stem) && /[aeiou]k$/.test(stem)) stem += 'e';
++    return append(stem, 'IH NG');
++  }
++  if (w.length > 4 && w.endsWith('ed')) {
++    const stem = w.slice(0, -2);
++    const suffix = /[td]$/.test(stem) ? 'IH D' : /(?:[pkfsx]|sh|ch)$/.test(stem) ? 'T' : 'D';
++    return append(stem, suffix);
+   }
+   // magic-e: silent final e after consonant, making preceding vowel long
+   let s = w.replace(/'/g, '');
+@@ -349,7 +378,7 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
+           const isVowel = VOWELS.has(k);
+           if (isVowel) {
+             // long vowel for magic-e or double vowel digraphs
+-            const longKey: Record<string, string> = { AE: 'EY', EH: 'EY', IH: 'AY', AA: 'EY', AH: 'EY' };
++            const longKey: Record<string, string> = { AE: 'EY', EH: 'IY', IH: 'AY', AA: 'OW', AH: 'UW' };
+             const key = magicE && longKey[k] ? longKey[k] : k;
+             toks.push({ key, stress: vowelIndex === 0 && s.length > 3 });
+             vowelIndex++;
+@@ -368,10 +397,15 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
+       continue;
+     }
+     let key = SINGLE[ch] ?? '';
++    // Word-final y is a vowel ("happy", "fly"); initial y is a consonant.
++    if (ch === 'y' && i === s.length - 1) key = vowelIndex === 0 ? 'AY' : 'IY';
++    else if (ch === 'y' && i > 0 && !/[aeiou]/.test(s[i - 1])) key = 'IH';
++    if (ch === 'c' && /[eiy]/.test(s[i + 1] ?? '')) key = 'S';
++    if (ch === 'g' && /[eiy]/.test(s[i + 1] ?? '')) key = 'JH';
+     if (key) {
+       if (VOWELS.has(key)) {
+         if (magicE) {
+-          const longKey: Record<string, string> = { AE: 'EY', EH: 'EY', IH: 'AY', AA: 'EY', AH: 'EY' };
++          const longKey: Record<string, string> = { AE: 'EY', EH: 'IY', IH: 'AY', AA: 'OW', AH: 'UW' };
+           key = longKey[key] ?? key;
+         }
+         toks.push({ key, stress: vowelIndex === 0 && s.length > 3 });
+@@ -386,6 +420,11 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
+   }
+   return toks.filter((t) => P[t.key]);
+ }
++
++/** Small, deterministic pronunciation inspector used by offline regression tests. */
++export function phonemesForWord(word: string): string[] {
++  return wordToPhones(word).map(tok => tok.key);
++}
+ // ---------- deterministic seeded RNG (natural, reproducible variation) ----------
+ export function hashString(s: string): number {
+   let h = 2166136261 >>> 0;
+@@ -428,6 +467,8 @@ interface ScheduledPhone {
+   enter: [number, number, number] | null; // coarticulation entry (previous target)
+   exit: [number, number, number] | null; // anticipatory target (next vowel)
+   nasal: boolean;
++  linkedPrev?: boolean;
++  linkedNext?: boolean;
+ }
+ 
+ export type { ScheduledPhone };
+@@ -549,6 +590,9 @@ function planSentence(
+   // --- pass 4: coarticulation — formants glide instead of stepping ---
+   for (let i = 0; i < phones.length; i++) {
+     const ph = phones[i];
++    // Maintain syllable continuity instead of fading every voiced phone to silence.
++    ph.linkedPrev = i > 0 && wordOf[i] === wordOf[i - 1] && isVoicedType(ph.def.type) && isVoicedType(phones[i - 1].def.type);
++    ph.linkedNext = i + 1 < phones.length && wordOf[i] === wordOf[i + 1] && isVoicedType(ph.def.type) && isVoicedType(phones[i + 1].def.type);
+     if (!ph.formants) continue;
+     const prev = i > 0 ? phones[i - 1] : null;
+     if (prev && prev.formants && differs3(prev.formants, ph.formants)) ph.enter = prev.formants;
+@@ -597,11 +641,13 @@ function formantCurve(ph: ScheduledPhone, fi: number): Float32Array | null {
+ }
+ 
+ /** Raised-cosine attack / plateau / release envelope — click-free by construction. */
+-function phoneEnvelope(dur: number, gain: number): Float32Array {
++function phoneEnvelope(dur: number, gain: number, linkedPrev = false, linkedNext = false): Float32Array {
+   const K = 24;
+   const arr = new Float32Array(K);
+-  const atkEnd = Math.min(0.3, 0.024 / Math.max(0.02, dur));
+-  const relStart = 1 - Math.min(0.38, 0.032 / Math.max(0.02, dur));
++  // A full 24/32ms attack/release PER phone created audible syllable gaps.
++  // Keep brief anti-click ramps; connected vowels/liquids get even shorter ramps.
++  const atkEnd = Math.min(0.24, (linkedPrev ? 0.004 : 0.011) / Math.max(0.02, dur));
++  const relStart = 1 - Math.min(0.3, (linkedNext ? 0.005 : 0.014) / Math.max(0.02, dur));
+   for (let k = 0; k < K; k++) {
+     const u = k / (K - 1);
+     let a: number;
+@@ -665,8 +711,8 @@ function noiseBuffer(ctx: BaseAudioContext): AudioBuffer {
+   const d = buf.getChannelData(0);
+   let s = 987654321;
+   for (let i = 0; i < len; i++) {
+-    s = (s * 1664525 + 1013904223) & 0x7fffffff;
+-    d[i] = (s / 0x7fffffff) * 2 - 1;
++    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
++    d[i] = (s / 0xffffffff) * 2 - 1;
+   }
+   return buf;
+ }
+@@ -721,8 +767,8 @@ export function buildGlottalBuffer(
+ 
+   // Human voices are never perfectly periodic: jitter (F0), shimmer (amp),
+   // vibrato and slow drift break the machine-like regularity.
+-  const jitterAmt = flat ? 0.012 : 0.055; // AR(1) walk → ~1–2.5 % cycle-to-cycle
+-  const shimmerAmt = flat ? 0.01 : 0.032;
++  const jitterAmt = flat ? 0.003 : 0.028; // AR(1) walk → ~1–2.5 % cycle-to-cycle
++  const shimmerAmt = flat ? 0.004 : 0.022;
+   const vibDepth = flat ? 0 : 0.0052;
+   const driftDepth = flat ? 0 : 0.004;
+   const vibHz = 4.4 + rng() * 0.9;
+@@ -828,7 +874,7 @@ function renderSentence(
+ 
+     if (voiced && ph.formants) {
+       const env = ctx.createGain();
+-      env.gain.setValueCurveAtTime(phoneEnvelope(dur, ph.gain), t0, dur);
++      env.gain.setValueCurveAtTime(phoneEnvelope(dur, ph.gain, ph.linkedPrev, ph.linkedNext), t0, dur);
+ 
+       // excitation: continuous glottal slice (phase-true across phones)
+       const src = ctx.createBufferSource();
+diff --git a/tests/reliability.test.mts b/tests/reliability.test.mts
+index 1f3efc7..cb5e59d 100644
+--- a/tests/reliability.test.mts
++++ b/tests/reliability.test.mts
+@@ -9,6 +9,7 @@ import { parseWav } from '@/lib/engines/os-tts-bridge';
+ import { saveBook, getBook, bookChunkId, putBookChunk, bookChunkInfo, claimBook, releaseBook, deleteBook } from '@/lib/engines/book-db';
+ import { chapterAudio, bookPackage } from '@/lib/engines/book-export';
+ import { autoTune } from '@/lib/engines/autotune';
++import { normalizeText, phonemesForWord, VOICE_PROFILES } from '@/lib/engines/formant';
+ 
+ function ab(a: Uint8Array): ArrayBuffer { return a.slice().buffer; }
+ async function collect(stream: AsyncIterable<Uint8Array>): Promise<ArrayBuffer> {
+@@ -125,3 +126,33 @@ test('queue serializes tasks, cancellation stays cancelled, and active jobs cann
+   assert.equal(useAppStore.getState().jobs.find(j => j.id === first)?.status, 'cancelled');
+   assert.deepEqual(order, ['first', 'second']);
+ });
++
++test('offline pronunciation regressions: irregulars, silent letters, magic-e and suffixes', () => {
++  const word = (s: string) => phonemesForWord(s).join(' ');
++  assert.equal(word('work'), 'W ER K');
++  assert.equal(word('robot'), 'R OW B AA T');
++  assert.equal(word('thoroughly'), 'TH ER OW L IY');
++  assert.equal(word('home'), 'HH OW M');
++  assert.equal(word('making'), 'M EY K IH NG');
++  assert.equal(word('happy'), 'HH AE P IY');
++  assert.equal(word('city'), 'S IH T IY');
++  assert.equal(word('action'), 'AE K SH AH N');
++  assert.equal(word('woman'), 'W UH M AH N');
++  assert.equal(word('queue'), 'K Y UW');
++  assert.ok(VOICE_PROFILES.find(v => v.id === 'chip-robotic')!.timbre > 0.95);
++  assert.equal(normalizeText('Dr. Stone met Mr. Jones at 3:30.'), 'doctor Stone met mister Jones at three thirty.');
++});
++
++test('OS voice auto-picking prioritizes quality and refuses unrelated languages', async () => {
++  const { pickOsVoiceForProfile } = await import('@/lib/engines/dispatch');
++  const voices = [
++    { id: 'espeak-ng:weak', engine: 'espeak-ng', name: 'weak', lang: 'en-US', gender: 'female', neural: false, quality: 1 },
++    { id: 'piper:clear', engine: 'piper', name: 'clear', lang: 'en-US', gender: 'female', neural: true, quality: 5 },
++    { id: 'say:ja', engine: 'say', name: 'ja', lang: 'ja-JP', gender: 'female', neural: false, quality: 3 },
++  ];
++  for (const profile of ['aura-bright', 'nova-narrator', 'junior']) {
++    assert.equal(pickOsVoiceForProfile(voices as any, profile, 'female', 'en')?.name, 'clear');
++    assert.equal(pickOsVoiceForProfile(voices as any, profile, 'female', 'ja')?.name, 'ja');
++  }
++  assert.equal(pickOsVoiceForProfile(voices as any, 'any', 'female', 'fr'), undefined);
++});
