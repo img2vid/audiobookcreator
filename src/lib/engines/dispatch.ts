@@ -32,6 +32,7 @@ import { allVoiceProfiles, hashString } from '@/lib/engines/formant';
 import { OS_ENGINE_CAPS, probeOsTtsBridge, synthesizeViaBridge } from '@/lib/engines/os-tts-bridge';
 import { prepareTextForNeuralSpeech, splitIntoChunks } from '@/lib/engines/speech';
 import { parseVoiceMarkup } from '@/lib/engines/markup';
+import { resampleBuffer } from '@/lib/engines/encode';
 
 /** Engine priority when auto-picking a bridge voice (realism first). */
 const ENGINE_PRIORITY: Record<OsTtsEngineId, number> = {
@@ -80,15 +81,20 @@ export function pickOsVoiceForProfile(
   const sorted = sortOsVoices(voices, langPrefix);
   const language = langPrefix?.split(/[-_]/)[0].toLowerCase();
   const matching = language ? sorted.filter(v => v.lang.toLowerCase().split(/[-_]/)[0] === language) : [];
+  // Never assign an unrelated-language voice and present gibberish as correct speech.
+  if (language && !matching.length) return undefined;
   const ranked = matching.length ? matching : sorted;
   const withGender = ranked.filter((v) => v.gender);
   const pool = gender && gender !== 'neutral' && withGender.length
     ? ranked.filter((v) => v.gender === gender)
     : ranked;
   const candidates = pool.length ? pool : ranked;
-  // stable per-profile index → deterministic, distinct voice assignments
-  const idx = candidates.length === 1 ? 0 : hashString(profileId || 'default') % candidates.length;
-  return candidates[idx];
+  // Rank first, diversify second. Previously a random hash could select a weak
+  // eSpeak voice even when high-quality Piper or OS natural voices were present.
+  const best = Math.max(...candidates.map(rankOsVoice));
+  const highQuality = candidates.filter(v => rankOsVoice(v) >= best - 10);
+  const idx = highQuality.length === 1 ? 0 : hashString(profileId || 'default') % highQuality.length;
+  return highQuality[idx];
 }
 
 // ---------- OS render planning (markup-aware chunking) ----------
@@ -268,8 +274,7 @@ async function renderViaOsBridge(
     const profile = allVoiceProfiles().find((p) => p.id === opts.profileId);
     voice = pickOsVoiceForProfile(candidates, opts.profileId, profile?.gender, opts.lang ?? 'en');
   }
-  if (!voice) voice = sortOsVoices(bridgeVoices)[0];
-  if (!voice) throw new Error('No OS voices available');
+  if (!voice) throw new Error(`No installed OS voice matches the requested language (${opts.lang ?? 'en'}). Install a voice for that language or choose one explicitly.`);
 
   const engine = voice.engine as OsTtsEngineId;
   // Unknown engine ids must NEVER crash a render (a NEW bridge can list
@@ -318,11 +323,15 @@ async function renderViaOsBridge(
       pitch: caps.pitch ? c.pitch : undefined,
       volume: caps.volume ? c.volume : undefined,
     }, 120_000, opts.signal);
-    // engines without volume control get the gain applied here
-    if (!caps.volume) applyGainInPlace(res.buffer, c.volume);
-    buffers.push(res.buffer);
-    sampleRate = sampleRate || res.buffer.sampleRate;
-    channels = Math.max(channels, res.buffer.numberOfChannels);
+    // Bridge engines may emit WAVs with different native sample rates.
+    // Normalize before concatenation or duration and pitch will be distorted.
+    const outputRate = sampleRate || res.buffer.sampleRate;
+    const normalized = res.buffer.sampleRate === outputRate
+      ? res.buffer : await resampleBuffer(res.buffer, outputRate);
+    if (!caps.volume) applyGainInPlace(normalized, c.volume);
+    buffers.push(normalized);
+    sampleRate = outputRate;
+    channels = Math.max(channels, normalized.numberOfChannels);
     if (c.pauseAfterMs > 0) {
       buffers.push(silenceBuffer(c.pauseAfterMs / 1000, sampleRate, channels));
     } else if (i < chunks.length - 1) {
