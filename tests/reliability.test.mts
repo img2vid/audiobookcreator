@@ -85,6 +85,10 @@ test('IDB commits, cross-tab lease, stale cache rejection, chapter/package expor
   await putBookChunk({ id: bookChunkId(p.id, c.id, 0), projectId: p.id, chapterId: c.id, index: 0, signature: renderSignature(p, text), pcm: new Blob([new Uint8Array(44100)]), frames: 22050, sampleRate: 22050, engineLabel: 'fixture' });
   const info = await bookChunkInfo(p.id); assert.equal(info.length, 1); assert.equal('pcm' in info[0], false);
   const audio = await chapterAudio(p, c.id); assert.equal(audio.duration, 1); assert.equal(audio.blob.size, 44144); assert.match(audio.vtt, /00:00:00.000 --> 00:00:01.000/);
+  // New WebKit-safe ArrayBuffer chunks and legacy Blob chunks must export identically.
+  await putBookChunk({ id: bookChunkId(p.id, c.id, 0), projectId: p.id, chapterId: c.id, index: 0, signature: renderSignature(p, text), pcm: new ArrayBuffer(44100), frames: 22050, sampleRate: 22050, engineLabel: 'buffer-fixture' });
+  const fromBuffer = await chapterAudio(p, c.id);
+  assert.equal(fromBuffer.blob.size, 44144); assert.equal(fromBuffer.duration, 1);
   await assert.rejects(() => chapterAudio({ ...p, rate: 1.2 }, c.id), /Render/);
   const archive = await collect(bookPackage(p)); const names = parseZip(archive).entries.map(e => e.name);
   assert.ok(names.includes('project.json') && names.includes('playlist.m3u8') && names.includes('chapters.json'));
