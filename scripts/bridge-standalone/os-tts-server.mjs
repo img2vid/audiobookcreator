@@ -29,15 +29,20 @@
 // ============================================================
 
 import http from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = 5;
+const VERSION = 6;
 const PORT = Number(process.env.PORT) || 8477;
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = '127.0.0.1'; // Never expose local speech/files to the LAN.
+const requestScope = new AsyncLocalStorage();
+const children = new Set();
+let activeSynthesis = false;
+const extraOrigins = new Set((process.env.BRIDGE_ALLOWED_ORIGINS || '').split(',').filter(Boolean));
 const MAX_TEXT_CHARS = 25_000;
 const ENGINE_TIMEOUT_MS = Number(process.env.ENGINE_TIMEOUT_MS) || 60_000;
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'os-tts-bridge-'));
@@ -51,6 +56,12 @@ function log(...args) {
 function run(cmd, args, { input, timeoutMs = ENGINE_TIMEOUT_MS, cwd } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { windowsHide: true, cwd });
+    children.add(child);
+    const signal = requestScope.getStore()?.signal;
+    const abort = () => { try { child.kill('SIGKILL'); } catch {} };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    child.stdin.on('error', () => {});
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -60,15 +71,18 @@ function run(cmd, args, { input, timeoutMs = ENGINE_TIMEOUT_MS, cwd } = {}) {
       try { child.kill('SIGKILL'); } catch { /* noop */ }
       reject(new Error(`${cmd} timed out after ${timeoutMs} ms`));
     }, timeoutMs);
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    child.stdout.on('data', (d) => { stdout = (stdout + d).slice(-1024 * 1024); });
+    child.stderr.on('data', (d) => { stderr = (stderr + d).slice(-1024 * 1024); });
+    const cleanup = () => { children.delete(child); signal?.removeEventListener('abort', abort); };
     child.on('error', (err) => {
+      cleanup();
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       reject(err);
     });
     child.on('close', (code) => {
+      cleanup();
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -98,7 +112,7 @@ async function which(bin) {
 }
 
 function uniqueTemp(ext) {
-  return path.join(TMP_DIR, `utt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.${ext}`);
+  return path.join(requestScope.getStore()?.dir ?? TMP_DIR, `utt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.${ext}`);
 }
 
 // The optional engines' Windows installers often do NOT add themselves to
@@ -556,8 +570,8 @@ ENGINES.say = {
     const args = ['-o', outFile, '--data-format=LEI16@22050'];
     if (voice) args.push('-v', voice);
     if (rate && Math.abs(rate - 1) > 0.01) args.push('-r', String(wpmFor(rate, 180)));
-    args.push(sanitizeText(text));
-    await run('say', args);
+    args.push('-f', '-');
+    await run('say', args, { input: sanitizeText(text) });
     return outFile;
   },
 };
@@ -579,7 +593,7 @@ function espeakListFactory(bin) {
           const m = /^\s*\S+\s+(\S+)\s+(\S+)\s+(\S+)\s+\S+.*$/.exec(line);
           if (!m) continue;
           const lang = m[1].replace('_', '-');
-          const gender = /female/i.test(m[2]) ? 'female' : /male/i.test(m[2]) ? 'male' : undefined;
+          const gender = /female|F$/i.test(m[2]) ? 'female' : /male|M$/i.test(m[2]) ? 'male' : undefined;
           const name = m[3];
           voices.push({
             id: `${bin}:${name}`,
@@ -606,8 +620,8 @@ function espeakListFactory(bin) {
       if (rate && Math.abs(rate - 1) > 0.01) args.push('-s', String(wpmFor(rate, 175)));
       if (pitch && Math.abs(pitch - 1) > 0.01) args.push('-p', String(espeakPitch(pitch)));
       if (volume != null && Math.abs(volume - 1) > 0.01) args.push('-a', String(espeakAmp(volume)));
-      args.push(sanitizeText(text));
-      await run(exe, args);
+      args.push('--stdin');
+      await run(exe, args, { input: sanitizeText(text) });
       return outFile;
     },
   };
@@ -804,22 +818,21 @@ function readBody(req, limit = 2 * 1024 * 1024) {
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > limit) {
-        reject(new Error('request body too large'));
-        req.destroy();
-        return;
-      }
+      if (size > limit) { reject(Object.assign(new Error('request body too large'), { status: 413 })); return; }
       chunks.push(c);
     });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
+    req.on('aborted', () => reject(Object.assign(new Error('Request was aborted'), { status: 400 })));
   });
 }
 
 const CORS = {
-  'Access-Control-Allow-Origin': '*',
+  // Set per response to a validated caller, never a wildcard.
+  'Vary': 'Origin',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Expose-Headers': 'X-OS-TTS-Engine',
   // Chrome "Private Network Access": pages served over HTTPS (e.g. GitHub Pages)
   // or from the LAN may talk to this loopback bridge ONLY if the preflight
   // response carries this header — without it Chrome blocks the request even
@@ -829,6 +842,13 @@ const CORS = {
 };
 
 const server = http.createServer(async (req, res) => {
+  const host = req.headers.host ?? '';
+  if (!/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host)) { res.writeHead(403).end('Invalid loopback Host'); return; }
+  const origin = req.headers.origin;
+  let localOrigin = false;
+  try { const u = new URL(origin); localOrigin = ['http:', 'https:'].includes(u.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname); } catch {}
+  if (origin && !localOrigin && !extraOrigins.has(origin)) { res.writeHead(403).end('Origin is not allowed. Use the local app.'); return; }
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
   const url = new URL(req.url ?? '/', 'http://localhost');
   const route = url.pathname.replace(/\/+$/, '') || '/';
 
@@ -838,6 +858,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  let ownsSynthesis = false;
   try {
     if (req.method === 'GET' && (route === '/ping' || route === '/' )) {
       // Liveness must be INSTANT. The first engine scan (PowerShell on Windows)
@@ -867,8 +888,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && route === '/synthesize') {
+      if (activeSynthesis) { res.setHeader('Retry-After', '1'); sendJson(res, 429, { error: 'Speech engine is busy; retry after the current chunk.' }); return; }
+      activeSynthesis = true; ownsSynthesis = true;
+      let body;
+      try { body = JSON.parse((await readBody(req)) || '{}'); } catch (err) { sendJson(res, err.status || 400, { error: 'Invalid or oversized JSON body' }); return; }
+      if (!body || typeof body !== 'object' || typeof body.text !== 'string') { sendJson(res, 400, { error: 'text must be a string' }); return; }
+      for (const key of ['rate', 'pitch', 'volume']) {
+        if (body[key] != null && (!Number.isFinite(body[key]) || body[key] < (key === 'rate' ? 0.1 : 0) || body[key] > (key === 'rate' ? 4 : key === 'pitch' ? 2 : 1))) { sendJson(res, 400, { error: `Invalid ${key}` }); return; }
+      }
+      if (body.engine && !ENGINES[body.engine]) { sendJson(res, 400, { error: 'Unknown speech engine' }); return; }
       await refreshEngines(false);
-      const body = JSON.parse((await readBody(req)) || '{}');
+      if (res.destroyed) return;
       const text = sanitizeText(body.text ?? '');
       if (!text.trim()) { sendJson(res, 400, { error: 'text is required' }); return; }
       if (text.length > MAX_TEXT_CHARS) { sendJson(res, 413, { error: `text exceeds ${MAX_TEXT_CHARS} chars — split it client-side` }); return; }
@@ -881,7 +911,7 @@ const server = http.createServer(async (req, res) => {
         ? body.voice.replace(/^(sapi|winrt|say|espeak-ng|espeak|piper):/, '').trim()
         : '';
       const voiceRec = wanted
-        ? enginesCache.voices.find((v) => String(v.name).toLowerCase() === wanted.toLowerCase())
+        ? enginesCache.voices.find((v) => (!body.engine || v.engine === body.engine) && (v.id === body.voice || String(v.name).toLowerCase() === wanted.toLowerCase()))
         : undefined;
       const engineId = voiceRec && ENGINES[voiceRec.engine] && enginesCache.available[voiceRec.engine]
         ? voiceRec.engine
@@ -894,9 +924,7 @@ const server = http.createServer(async (req, res) => {
       // OLD deployed app bundles never send it (they only know the voice
       // name). Resolve it HERE from the record we matched — never trust the
       // client, and never hand piper an empty --model.
-      let modelPath = typeof body.modelPath === 'string' && body.modelPath && fs.existsSync(body.modelPath)
-        ? body.modelPath
-        : undefined;
+      let modelPath; // Model paths come only from the server-owned voice registry.
       if (engineId === 'piper') {
         if (voiceRec?.modelPath) modelPath = voiceRec.modelPath;
         else if (!modelPath || !voiceRec) {
@@ -909,19 +937,27 @@ const server = http.createServer(async (req, res) => {
           return;
         }
       }
+      if (body.engine && engineId !== body.engine) { sendJson(res, 503, { error: `Requested engine ${body.engine} is unavailable` }); return; }
       const eng = ENGINES[engineId];
       const voice = wanted || undefined;
       log(`synthesize: engine=${engineId} voice=${voice ?? '(default)'}${engineId === 'piper' ? ` model=${modelPath}` : ''} chars=${text.length}`);
       let file;
+      const dir = fs.mkdtempSync(path.join(TMP_DIR, 'request-'));
+      const ctrl = new AbortController();
+      const disconnect = () => { if (!res.writableEnded) ctrl.abort(); };
+      res.once('close', disconnect);
       try {
-        file = await eng.synth({ ...body, text, voice, modelPath });
+        file = await requestScope.run({ dir, signal: ctrl.signal }, () => eng.synth({ ...body, text, voice, modelPath }));
+        ctrl.signal.throwIfAborted();
       } catch (err) {
         // enrich + log so the 500 body (which the app toasts) names the
         // engine and the underlying cause — no more opaque failures
         log(`synthesize failed: engine=${engineId} voice=${voice ?? '(default)'} — ${err.message}`);
+        fs.rmSync(dir, { recursive: true, force: true });
         throw new Error(`${engineId} render failed: ${err.message}`);
-      }
+      } finally { res.removeListener('close', disconnect); }
       if (!fs.existsSync(file) || fs.statSync(file).size < 44) {
+        fs.rmSync(dir, { recursive: true, force: true });
         throw new Error('engine produced no audio');
       }
       res.writeHead(200, {
@@ -931,7 +967,7 @@ const server = http.createServer(async (req, res) => {
         'Cache-Control': 'no-store',
       });
       const data = fs.readFileSync(file);
-      try { fs.unlinkSync(file); } catch { /* noop */ }
+      fs.rmSync(dir, { recursive: true, force: true });
       res.end(data);
       return;
     }
@@ -939,7 +975,9 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 404, { error: `unknown route ${route}` });
   } catch (err) {
     log('error:', err.message);
-    sendJson(res, 500, { error: err.message });
+    if (!res.destroyed && !res.headersSent) sendJson(res, err.status || 500, { error: err.message });
+  } finally {
+    if (req.method === 'POST' && route === '/synthesize' && ownsSynthesis) activeSynthesis = false;
   }
 });
 
@@ -965,7 +1003,12 @@ server.listen(PORT, HOST, async () => {
   log('Press Ctrl+C to stop.');
 });
 
-process.on('SIGINT', () => {
-  try { fs.rmSync(TMP_DIR, { recursive: true, force: true }); } catch { /* noop */ }
+function shutdown() {
+  for (const child of children) { try { child.kill('SIGKILL'); } catch {} }
+  try { fs.rmSync(TMP_DIR, { recursive: true, force: true }); } catch {}
+  server.close();
   process.exit(0);
-});
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+server.on('error', err => { console.error(`Speech bridge: ${err.message}`); shutdown(); });

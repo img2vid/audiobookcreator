@@ -165,3 +165,17 @@ The static reasons for the remaining engines are intentional: `say` is
 macOS-only, and `espeak-ng` / `espeak` / `piper` are optional installs —
 their reasons include where to get them. Self-checks:
 `node scripts/bridge-v4-checks.mjs` (static + live round-trip).
+
+## Version 6 local-first changes
+
+The maintained implementation is `scripts/os-tts-server.mjs`. The root entrypoint
+imports it; the standalone bundle includes an identical copy. Version 6 always
+binds to 127.0.0.1 (HOST no longer exposes it to a network), validates the Host,
+and accepts loopback browser origins. Hosted UI access is opt-in via the exact
+comma-separated `BRIDGE_ALLOWED_ORIGINS` environment variable.
+
+Only one synthesis request runs at a time; overlapping calls return HTTP 429.
+Invalid JSON/control values return 400. Client disconnects terminate active
+engine processes; per-request temporary files are removed. Piper model paths
+come from the server's model registry, not an arbitrary client filesystem path.
+The canonical GUI/bridge launcher is `npm run local`.

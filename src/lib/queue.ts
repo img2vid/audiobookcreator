@@ -44,7 +44,7 @@ function maxConcurrency(): number {
   try {
     return Math.max(1, useAppStore.getState().tuned.queueConcurrency);
   } catch {
-    return 2;
+    return 1;
   }
 }
 
@@ -112,7 +112,8 @@ async function runJob(id: string) {
 
   const api: JobApi = {
     setProgress: (p, msg) => {
-      patchJob(id, { progress: Math.min(1, Math.max(0, p)), message: msg });
+      if (ctrl.cancelled) throw new DOMException('Job cancelled', 'AbortError');
+      patchJob(id, { progress: Number.isFinite(p) ? Math.min(1, Math.max(0, p)) : 0, message: msg });
       emit();
     },
     shouldCancel: () => ctrl.cancelled,
@@ -153,6 +154,11 @@ async function runJob(id: string) {
       useAppStore.getState().logActivity('job-done', job.label);
     }
   } catch (err) {
+    if (ctrl.cancelled) {
+      patchJob(id, { status: 'cancelled', finishedAt: Date.now(), message: 'Cancelled' });
+      useAppStore.getState().logActivity('job-cancelled', job.label);
+      return;
+    }
     patchJob(id, {
       status: 'error',
       finishedAt: Date.now(),
@@ -161,6 +167,7 @@ async function runJob(id: string) {
     });
     useAppStore.getState().logActivity('job-error', job.label);
   } finally {
+    taskMap.delete(id); // Release captured documents and AudioBuffers after completion.
     emit();
     pump();
   }
@@ -193,6 +200,7 @@ export function enqueueJob(
 }
 
 export function pauseJob(id: string) {
+  if (jobsSnapshot().find(j => j.id === id)?.status !== 'running') return;
   const c = controllers.get(id);
   if (c) c.paused = true;
   patchJob(id, { status: 'paused' });
@@ -200,6 +208,7 @@ export function pauseJob(id: string) {
 }
 
 export function resumeJob(id: string) {
+  if (jobsSnapshot().find(j => j.id === id)?.status !== 'paused' || !taskMap.has(id)) return;
   const c = controllers.get(id);
   if (c) c.paused = false;
   patchJob(id, { status: 'running' });
@@ -212,6 +221,7 @@ export function cancelJob(id: string) {
   const job = useAppStore.getState().jobs.find((j) => j.id === id);
   if (job && (job.status === 'queued' || job.status === 'paused')) {
     patchJob(id, { status: 'cancelled', finishedAt: Date.now() });
+    if (job.status === 'queued') taskMap.delete(id);
   }
   emit();
   setTimeout(() => pump(), 100);
@@ -238,6 +248,8 @@ export function runQueuedNow(id: string) {
 }
 
 export function dismissJob(id: string) {
+  const job = jobsSnapshot().find(j => j.id === id);
+  if (job && ['running', 'paused', 'queued'].includes(job.status)) return;
   taskMap.delete(id);
   controllers.delete(id);
   useAppStore.getState().removeJob(id);
@@ -251,9 +263,7 @@ export function getJobLogs(id: string): string[] {
 /** Re-pump after app load (persisted store may restore old rows). */
 export function initQueue() {
   const s = useAppStore.getState();
-  s.jobs
-    .filter((j) => j.status === 'running' || j.status === 'queued')
-    .forEach((j) => {
-      if (j.status === 'running') patchJob(j.id, { status: 'error', error: 'Interrupted by reload' });
-    });
+  s.jobs.filter(j => ['running', 'queued', 'paused'].includes(j.status) && !taskMap.has(j.id))
+    .forEach(j => patchJob(j.id, { status: 'error', finishedAt: Date.now(), error: 'Interrupted by reload. Recreate this studio task, or use Book Conversion Desk for resumable books.' }));
+  pump();
 }

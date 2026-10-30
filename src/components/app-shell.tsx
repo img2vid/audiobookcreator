@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { useAppStore } from '@/lib/stores/app-store';
 import { initQueue, subscribeQueue } from '@/lib/queue';
 import { isSpeechSynthesisAvailable, listSystemVoices } from '@/lib/engines/speech';
@@ -33,6 +34,7 @@ const NAV: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, group: 'Workspace', hint: 'Overview & quick actions' },
   { id: 'assets', label: 'Asset Bin', icon: Database, group: 'Workspace', hint: 'Renders, exports & OCR results' },
   { id: 'queue', label: 'Activity & Queue', icon: Activity, group: 'Workspace', hint: 'Background jobs monitor' },
+  { id: 'book-desk', label: 'Book Conversion Desk', icon: BookOpen, group: 'Create', hint: 'CPU-only, resumable file conversion' },
   { id: 'autobook', label: 'AutoBook', icon: WandSparkles, group: 'Create', hint: 'One-click any file → audiobook' },
   { id: 'tts', label: 'TTS Studio', icon: AudioLines, group: 'Create', hint: 'Local AI text-to-speech' },
   { id: 'dialogue', label: 'Dialogue Studio', icon: MessagesSquare, group: 'Create', hint: 'Multi-speaker scripts' },
@@ -56,7 +58,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const badgeFor = (id: ViewId) =>
     id === 'assets' ? assetCount : id === 'queue' ? activeJobs : 0;
   return (
-    <div className="flex h-full flex-col gap-1 p-3">
+    <div className="flex h-full flex-col gap-1 overflow-y-auto p-3">
       <div className="mb-3 flex items-center gap-2.5 px-2 pt-1">
         <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow">
           <Mic className="h-5 w-5" />
@@ -110,7 +112,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
         <div className="mb-1 flex items-center gap-1.5 font-medium text-foreground">
           <Waves className="h-3.5 w-3.5" /> Private by design
         </div>
-        All synthesis, OCR, conversion and rendering happens on this device. Files never leave the browser.
+        All synthesis, OCR, conversion and rendering happens on this device. Documents stay on this device; the optional speech bridge runs locally.
       </div>
     </div>
   );
@@ -146,6 +148,7 @@ function EngineChip() {
 }
 
 const VIEW_TITLES: Record<ViewId, { title: string; sub: string }> = {
+  'book-desk': { title: 'Book Conversion Desk', sub: 'Local CPU rendering, saved chunks and chapter downloads' },
   dashboard: { title: 'Dashboard', sub: 'Everything local. Everything fast.' },
   assets: { title: 'Asset Bin', sub: 'Session renders, exports & extracted text' },
   queue: { title: 'Activity & Queue', sub: 'Background jobs with pause/resume/cancel' },
@@ -240,7 +243,7 @@ export function AppShell() {
     void listSystemVoices().then((voices) => {
       setEngine({
         systemVoices: voices.length,
-        ttsEngine: isSpeechSynthesisAvailable() ? 'ai' : 'fallback',
+        ttsEngine: 'idle',
         fallbackReason: isSpeechSynthesisAvailable() ? undefined : 'Speech synthesis unavailable',
       });
     });
@@ -361,66 +364,56 @@ export function AppShell() {
           >
             <kbd className="rounded border bg-muted px-1 font-mono text-[10px]">?</kbd> shortcuts
           </button>
-          <span className="ml-auto hidden shrink-0 lg:inline">Openmukti Audiobook Creator v2.1 · AutoBook inside</span>
+          <span className="ml-auto hidden shrink-0 lg:inline">Openmukti Audiobook Creator v0.4 · CPU ready</span>
         </footer>
       </div>
     </div>
   );
 }
 
-// Lazy view registry keeps the shell light.
-import { DashboardView } from '@/components/views/dashboard-view';
-import { AssetBinView } from '@/components/views/asset-bin-view';
-import { QueueView } from '@/components/views/queue-view';
-import { AutoBookView } from '@/components/views/autobook-view';
-import { TtsStudioView } from '@/components/views/tts-studio-view';
-import { DialogueView } from '@/components/views/dialogue-view';
-import { FileStudioView } from '@/components/views/file-studio-view';
-import { AudiobookView } from '@/components/views/audiobook-view';
-import { VideoEditorView } from '@/components/views/video-editor-view';
-import { OcrLabView } from '@/components/views/ocr-lab-view';
-import { TranscribeView } from '@/components/views/transcribe-view';
-import { VoiceLibraryView } from '@/components/views/voice-library-view';
-import { SettingsView } from '@/components/views/settings-view';
-import { FeaturesView } from '@/components/views/features-view';
+// Code-split each studio and mount it only after the first visit.
+const DashboardView = dynamic(() => import('@/components/views/dashboard-view').then(m => m.DashboardView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const AssetBinView = dynamic(() => import('@/components/views/asset-bin-view').then(m => m.AssetBinView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const QueueView = dynamic(() => import('@/components/views/queue-view').then(m => m.QueueView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const BookDeskView = dynamic(() => import('@/components/views/book-desk-view').then(m => m.BookDeskView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const AutoBookView = dynamic(() => import('@/components/views/autobook-view').then(m => m.AutoBookView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const TtsStudioView = dynamic(() => import('@/components/views/tts-studio-view').then(m => m.TtsStudioView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const DialogueView = dynamic(() => import('@/components/views/dialogue-view').then(m => m.DialogueView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const FileStudioView = dynamic(() => import('@/components/views/file-studio-view').then(m => m.FileStudioView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const AudiobookView = dynamic(() => import('@/components/views/audiobook-view').then(m => m.AudiobookView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const VideoEditorView = dynamic(() => import('@/components/views/video-editor-view').then(m => m.VideoEditorView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const OcrLabView = dynamic(() => import('@/components/views/ocr-lab-view').then(m => m.OcrLabView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const TranscribeView = dynamic(() => import('@/components/views/transcribe-view').then(m => m.TranscribeView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const VoiceLibraryView = dynamic(() => import('@/components/views/voice-library-view').then(m => m.VoiceLibraryView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const SettingsView = dynamic(() => import('@/components/views/settings-view').then(m => m.SettingsView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+const FeaturesView = dynamic(() => import('@/components/views/features-view').then(m => m.FeaturesView), { ssr: false, loading: () => <p role="status">Loading studio…</p> });
+
+const VIEW_COMPONENTS = {
+  'dashboard': DashboardView,
+  'assets': AssetBinView,
+  'queue': QueueView,
+  'book-desk': BookDeskView,
+  'autobook': AutoBookView,
+  'tts': TtsStudioView,
+  'dialogue': DialogueView,
+  'files': FileStudioView,
+  'audiobook': AudiobookView,
+  'video': VideoEditorView,
+  'ocr': OcrLabView,
+  'transcribe': TranscribeView,
+  'voices': VoiceLibraryView,
+  'settings': SettingsView,
+  'features': FeaturesView,
+};
 
 function ViewRouter({ view }: { view: ViewId }) {
-  // All views stay mounted (hidden when inactive) so in-progress work —
-  // file lists, text inputs, timelines — survives navigation. Incoming
-  // views animate in (tw-animate-css) since display:none resets animations.
-  const views: [ViewId, React.ReactNode][] = [
-    ['dashboard', <DashboardView key="dashboard" />],
-    ['assets', <AssetBinView key="assets" />],
-    ['queue', <QueueView key="queue" />],
-    ['autobook', <AutoBookView key="autobook" />],
-    ['tts', <TtsStudioView key="tts" />],
-    ['dialogue', <DialogueView key="dialogue" />],
-    ['files', <FileStudioView key="files" />],
-    ['audiobook', <AudiobookView key="audiobook" />],
-    ['video', <VideoEditorView key="video" />],
-    ['ocr', <OcrLabView key="ocr" />],
-    ['transcribe', <TranscribeView key="transcribe" />],
-    ['voices', <VoiceLibraryView key="voices" />],
-    ['settings', <SettingsView key="settings" />],
-    ['features', <FeaturesView key="features" />],
-  ];
-  return (
-    <>
-      {views.map(([id, node]) => (
-        <div
-          key={id}
-          className={
-            view === id
-              ? 'block animate-in fade-in-0 slide-in-from-bottom-3 duration-300'
-              : 'hidden'
-          }
-          aria-hidden={view !== id}
-        >
-          {node}
-        </div>
-      ))}
-    </>
-  );
+  const [visited, setVisited] = useState<ViewId[]>([view]);
+  useEffect(() => { setVisited(old => old.includes(view) ? old : [...old, view]); }, [view]);
+  // Keep visited studios mounted so navigation does not cancel running work.
+  return <>{[...new Set([...visited, view])].map(id => {
+    const Component = VIEW_COMPONENTS[id];
+    return <div key={id} hidden={view !== id} aria-hidden={view !== id}><Component /></div>;
+  })}</>;
 }
 
 function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {

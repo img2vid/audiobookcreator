@@ -67,9 +67,11 @@ export async function ocrPdfToText(
     },
   });
 
+  let task: any;
   try {
     const data = new Uint8Array(await file.arrayBuffer());
-    const pdf = await pdfjs.getDocument({ data }).promise;
+    task = pdfjs.getDocument({ data, cMapUrl: assetUrl('./pdfjs/cmaps/'), cMapPacked: true, standardFontDataUrl: assetUrl('./pdfjs/standard_fonts/'), wasmUrl: assetUrl('./pdfjs/wasm/') });
+    const pdf = await task.promise;
     const chunks: string[] = [];
     let confidenceSum = 0;
     let confidenceCount = 0;
@@ -78,12 +80,14 @@ export async function ocrPdfToText(
     for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
       onProgress?.(0.12 + ((pageNo - 1) / Math.max(1, pdf.numPages)) * 0.84, `OCR page ${pageNo}/${pdf.numPages}…`);
       const page = await pdf.getPage(pageNo);
-      const viewport = page.getViewport({ scale });
+      const original = page.getViewport({ scale });
+      const maxPixels = { lite: 800_000, standard: 2_000_000, heavy: 4_000_000, ultra: 6_000_000 }[opts.power];
+      const viewport = page.getViewport({ scale: scale * Math.min(1, Math.sqrt(maxPixels / (original.width * original.height))) });
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.round(viewport.width));
       canvas.height = Math.max(1, Math.round(viewport.height));
       const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
-      if (!ctx) continue;
+      if (!ctx) throw new Error('Canvas rendering is unavailable');
       await page.render({ canvasContext: ctx, viewport }).promise;
       const prepared = preprocessPage(canvas, opts.power);
       const result = await worker.recognize(prepared);
@@ -94,9 +98,9 @@ export async function ocrPdfToText(
         confidenceSum += c / 100;
         confidenceCount++;
       }
-      canvas.width = 1;
-      canvas.height = 1;
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      canvas.width = canvas.height = prepared.width = prepared.height = 1;
+      page.cleanup();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
 
     onProgress?.(1, `PDF OCR complete — ${pdf.numPages} pages`);
@@ -107,5 +111,6 @@ export async function ocrPdfToText(
     };
   } finally {
     await worker.terminate();
+    await task?.destroy();
   }
 }

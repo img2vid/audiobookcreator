@@ -5,6 +5,7 @@
 
 // ---------- Navigation ----------
 export type ViewId =
+  | 'book-desk'
   | 'dashboard'
   | 'assets'
   | 'autobook'

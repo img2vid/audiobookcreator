@@ -77,7 +77,10 @@ export function pickOsVoiceForProfile(
   langPrefix?: string,
 ): OsTtsVoiceDef | undefined {
   if (!voices.length) return undefined;
-  const ranked = sortOsVoices(voices, langPrefix);
+  const sorted = sortOsVoices(voices, langPrefix);
+  const language = langPrefix?.split(/[-_]/)[0].toLowerCase();
+  const matching = language ? sorted.filter(v => v.lang.toLowerCase().split(/[-_]/)[0] === language) : [];
+  const ranked = matching.length ? matching : sorted;
   const withGender = ranked.filter((v) => v.gender);
   const pool = gender && gender !== 'neutral' && withGender.length
     ? ranked.filter((v) => v.gender === gender)
@@ -159,6 +162,8 @@ function concatSameRate(buffers: AudioBuffer[], sampleRate: number, channels: nu
 // ---------- the dispatcher ----------
 
 export interface DispatchOptions {
+  signal?: AbortSignal;
+  lang?: string;
   /** Selected TTS model — decides which engine family renders. */
   model: TTSModelDef;
   /** Bundled formant profile (used directly by formant; maps to an OS voice otherwise). */
@@ -193,6 +198,7 @@ export async function synthesizeWithSelectedEngine(
   text: string,
   opts: DispatchOptions,
 ): Promise<TtsRenderResult> {
+  opts.signal?.throwIfAborted();
   const { model } = opts;
   const useOsEngine = !opts.forceFallback && model.engine !== 'formant';
 
@@ -202,6 +208,7 @@ export async function synthesizeWithSelectedEngine(
       try {
         return await renderViaOsBridge(text, opts, probe.voices);
       } catch (err) {
+        opts.signal?.throwIfAborted();
         if (!opts.fallbackOnBridgeUnavailable) throw err;
         const reason = `OS engine render failed (${err instanceof Error ? err.message : String(err)}) — rendered with the bundled engine instead.`;
         const buf = await renderViaFormant(text, opts);
@@ -241,7 +248,7 @@ async function renderViaFormant(
     pitch: opts.pitch,
     volume: opts.volume,
     quality: opts.quality,
-  }, opts.onProgress);
+  }, p => { opts.signal?.throwIfAborted(); opts.onProgress?.(p); });
 }
 
 async function renderViaOsBridge(
@@ -252,10 +259,14 @@ async function renderViaOsBridge(
   // 1. resolve the OS voice — explicit pick wins, else map the profile
   let voice: OsTtsVoiceDef | undefined;
   if (opts.osVoiceId) voice = bridgeVoices.find((v) => v.id === opts.osVoiceId);
+  if (opts.osVoiceId && !voice) throw new Error('The selected OS voice is no longer installed. Refresh voices and choose another.');
   if (!voice && opts.voiceURI) voice = bridgeVoices.find((v) => v.id === opts.voiceURI);
+  const voiceClass = voiceClassForModel(opts.model);
+  const filtered = bridgeVoices.filter(v => voiceClass === 'any' || (voiceClass === 'neural' ? v.neural : !v.neural));
+  const candidates = filtered.length ? filtered : bridgeVoices;
   if (!voice) {
     const profile = allVoiceProfiles().find((p) => p.id === opts.profileId);
-    voice = pickOsVoiceForProfile(bridgeVoices, opts.profileId, profile?.gender, 'en');
+    voice = pickOsVoiceForProfile(candidates, opts.profileId, profile?.gender, opts.lang ?? 'en');
   }
   if (!voice) voice = sortOsVoices(bridgeVoices)[0];
   if (!voice) throw new Error('No OS voices available');
@@ -297,6 +308,7 @@ async function renderViaOsBridge(
   let channels = 1;
   let i = 0;
   for (const c of chunks) {
+    opts.signal?.throwIfAborted();
     const res = await synthesizeViaBridge({
       engine,
       voice: voice!.name,
@@ -305,7 +317,7 @@ async function renderViaOsBridge(
       rate: caps.rate ? c.rate : undefined,
       pitch: caps.pitch ? c.pitch : undefined,
       volume: caps.volume ? c.volume : undefined,
-    });
+    }, 120_000, opts.signal);
     // engines without volume control get the gain applied here
     if (!caps.volume) applyGainInPlace(res.buffer, c.volume);
     buffers.push(res.buffer);

@@ -39,6 +39,8 @@ function buildDb(): Record<string, IngestCategory> {
       if (k && !(k in db)) db[k] = cat;
     }
   };
+  add('html htm xhtml docx docm xlsx xlsm pptx pptm epub odt rtf pdf'.split(' '), 'document');
+  add('json jsonc jsonl ndjson geojson topojson yaml yml csv tsv'.split(' '), 'data');
   add(TEXT_EXTS, 'text');
   add(CODE_EXTS, 'code');
   add(DATA_EXTS, 'data');
@@ -95,7 +97,8 @@ function cleanText(t: string): string {
 }
 
 async function readTextSmart(file: File): Promise<string> {
-  const buf = await file.slice(0, Math.min(file.size, 32 * 1024 * 1024)).arrayBuffer();
+  if (file.size > 64 * 1024 * 1024) throw new Error('Text file exceeds 64 MB. Split it into smaller volumes; no text has been truncated.');
+  const buf = await file.arrayBuffer();
   const u8 = new Uint8Array(buf);
   // BOMs
   if (u8[0] === 0xff && u8[1] === 0xfe) return new TextDecoder('utf-16le').decode(u8);
@@ -206,6 +209,7 @@ function rtfToText(rtf: string): string {
   return rtf
     .replace(/\\'([0-9a-f]{2})/gi, (_m, h) => String.fromCharCode(parseInt(h, 16)))
     .replace(/\{\\\*[^}]*\}/g, '')
+    .replace(/\\u(-?\d+)\??/g, (_m, n) => String.fromCharCode(Number(n) & 0xffff))
     .replace(/\\par[d]?\b/g, '\n')
     .replace(/\\line\b/g, '\n')
     .replace(/\\tab\b/g, '\t')
@@ -337,41 +341,43 @@ async function pptxToText(buf: ArrayBuffer): Promise<string> {
   return out.join('\n\n');
 }
 
-async function epubToText(buf: ArrayBuffer): Promise<string> {
+export async function epubToText(buf: ArrayBuffer): Promise<string> {
   const { entries } = parseZip(buf);
-  const container = entries.find((e) => e.name === 'META-INF/container.xml');
-  let opfPath = '';
-  if (container) {
-    const xml = await readZipEntryText(buf, container);
-    opfPath = xml.match(/full-path="([^"]+)"/)?.[1] ?? '';
-  }
-  let order: string[] = [];
-  if (opfPath) {
-    const opf = entries.find((e) => e.name === opfPath);
-    if (opf) {
-      const xml = await readZipEntryText(buf, opf);
-      const baseDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
-      order = Array.from(xml.matchAll(/idref="([^"]+)"/g)).map((m) => m[1]);
-      const idToHref = new Map(Array.from(xml.matchAll(/<item\b[^>]*id="([^"]+)"[^>]*href="([^"]+)"/g)).map((m) => [m[1], m[2]]));
-      // fallback attribute order
-      for (const m of xml.matchAll(/<item\b([^>]*)>/g)) {
-        const id = m[1].match(/id="([^"]+)"/)?.[1];
-        const href = m[1].match(/href="([^"]+)"/)?.[1];
-        if (id && href) idToHref.set(id, href);
-      }
-      order = order.map((id) => idToHref.get(id) ?? '').filter(Boolean).map((h) => baseDir + h);
-    }
-  }
-  const docs = order.length ? order : entries.filter((e) => /\.x?html?$/i.test(e.name)).map((e) => e.name);
-  const out: string[] = [];
-  for (const name of docs.slice(0, 40)) {
-    const entry = entries.find((e) => e.name === name);
-    if (!entry) continue;
+  const readXml = async (name: string) => {
+    const entry = entries.find(e => e.name === name);
+    if (!entry) throw new Error(`EPUB is missing ${name}`);
+    const dom = new DOMParser().parseFromString(await readZipEntryText(buf, entry), 'text/xml');
+    if (dom.getElementsByTagName('parsererror').length) throw new Error(`Invalid EPUB XML: ${name}`);
+    return dom;
+  };
+  const container = await readXml('META-INF/container.xml');
+  const rootfile = Array.from(container.getElementsByTagNameNS('*', 'rootfile'))[0];
+  const opfPath = rootfile?.getAttribute('full-path');
+  if (!opfPath) throw new Error('EPUB has no package rootfile');
+  const opf = await readXml(opfPath);
+  const items = new Map(Array.from(opf.getElementsByTagNameNS('*', 'item')).map(item => [item.getAttribute('id'), item]));
+  const refs = Array.from(opf.getElementsByTagNameNS('*', 'itemref'));
+  if (!refs.length) throw new Error('EPUB has no reading-order spine');
+  const parts: string[] = [];
+  let characters = 0;
+  for (const ref of refs) {
+    const item = items.get(ref.getAttribute('idref'));
+    if (!item) throw new Error('EPUB spine refers to a missing manifest item');
+    const href = item.getAttribute('href');
+    if (!href) throw new Error('EPUB chapter has no href');
+    const url = new URL(href, `https://epub.invalid/${opfPath}`);
+    if (url.origin !== 'https://epub.invalid') throw new Error('External EPUB chapters are not downloaded. Import a self-contained EPUB.');
+    const name = decodeURIComponent(url.pathname.slice(1));
+    const entry = entries.find(e => e.name === name);
+    if (!entry) throw new Error(`EPUB chapter is missing: ${name} (possibly DRM protected)`);
     const html = await readZipEntryText(buf, entry);
     const text = htmlToText(html);
-    if (text) out.push(text);
+    characters += text.length;
+    if (characters > 20_000_000) throw new Error('EPUB exceeds 20 million characters. Import smaller volumes.');
+    if (text) parts.push(text);
+    await yieldToUI();
   }
-  return out.join('\n\n');
+  return parts.join('\n\n');
 }
 
 async function odtToText(buf: ArrayBuffer): Promise<string> {
@@ -389,6 +395,7 @@ export async function ingestFile(
   file: File,
   opts?: { ocr?: OcrOptions; pdfOcr?: OcrOptions; onProgress?: (p: number, msg?: string) => void },
 ): Promise<IngestResult> {
+  if (file.size > 64 * 1024 * 1024) throw new Error('File exceeds the 64 MB import limit. Split it into smaller files to protect device memory.');
   const t0 = performance.now();
   const onProgress = opts?.onProgress;
   const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
@@ -505,7 +512,8 @@ export async function ingestFile(
           metadata.format = 'OpenDocument Text';
         } else if (ext === 'pdf') {
           const pdf = await extractPdfText(buf, (p) => onProgress?.(0.3 + p * 0.5, 'Scanning PDF streams'));
-          if (pdf.ok) {
+          if (pdf.warning) warnings.push(pdf.warning);
+          if (pdf.ok && !(opts?.pdfOcr && pdf.warning)) {
             text = pdf.text;
             textKind = 'extracted';
             metadata.pages = pdf.pages;

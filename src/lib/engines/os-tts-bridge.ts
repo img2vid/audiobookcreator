@@ -99,13 +99,12 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
   if (!force && cached && Date.now() - cached.at < CACHE_MS) return cached.result;
   if (inFlight) return inFlight;
   inFlight = (async (): Promise<ProbeResult> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 45_000);
     try {
-      const ctrl = new AbortController();
       // 10 s: a cold bridge answers /ping instantly, but on some Windows boxes
       // even process startup can lag — do not give up before it had a chance.
-      const timer = setTimeout(() => ctrl.abort(), 10_000);
       const res = await fetch(`${url}/ping`, { signal: ctrl.signal, cache: 'no-store' });
-      clearTimeout(timer);
       if (!res.ok) throw new Error(`bridge /ping → HTTP ${res.status}`);
       const info = (await res.json()) as {
         ok?: boolean; platform?: string; engines?: Record<string, boolean>;
@@ -122,7 +121,7 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
       let voices: OsTtsVoiceDef[] = [];
       if (status.ok) {
         try {
-          const vres = await fetch(`${url}/voices`, { cache: 'no-store' });
+          const vres = await fetch(`${url}/voices`, { cache: 'no-store', signal: ctrl.signal });
           if (vres.ok) {
             const data = (await vres.json()) as { voices?: OsTtsVoiceDef[] };
             voices = Array.isArray(data.voices) ? data.voices : [];
@@ -140,6 +139,7 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
       cached = { at: Date.now(), result };
       return result;
     } finally {
+      clearTimeout(timer);
       inFlight = null;
     }
   })();
@@ -172,9 +172,12 @@ export function parseWav(buffer: ArrayBuffer): WavInfo {
   while (off + 8 <= view.byteLength) {
     const id = String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3]);
     const size = view.getUint32(off + 4, true);
+    if (size > view.byteLength - off - 8) throw new Error('Truncated WAV chunk');
     if (id === 'fmt ') {
+      if (size < 16) throw new Error('Truncated WAV format');
       format = view.getUint16(off + 8, true);
-      channels = Math.max(1, view.getUint16(off + 10, true));
+      if (format === 65534 && size >= 40) format = view.getUint16(off + 32, true);
+      channels = view.getUint16(off + 10, true);
       sampleRate = view.getUint32(off + 12, true) || 22050;
       bits = view.getUint16(off + 22, true) || 16;
     } else if (id === 'data') {
@@ -184,7 +187,8 @@ export function parseWav(buffer: ArrayBuffer): WavInfo {
     off += 8 + size + (size % 2);
   }
   if (dataOff < 0) throw new Error('WAV has no data chunk');
-  const bytesPer = Math.max(1, bits >> 3);
+  if (![1, 3].includes(format) || (format === 3 ? bits !== 32 : ![8, 16, 24, 32].includes(bits)) || channels < 1 || channels > 2 || sampleRate < 8000 || sampleRate > 192000 || dataLen > 64 * 1024 * 1024) throw new Error('Unsupported or oversized WAV encoding');
+  const bytesPer = bits / 8;
   const frames = Math.floor(dataLen / (bytesPer * channels));
   const out: Float32Array<ArrayBuffer>[] = [];
   for (let c = 0; c < channels; c++) out.push(new Float32Array(frames));
@@ -239,10 +243,14 @@ export interface OsSynthResult {
 }
 
 /** Synthesize one chunk through the bridge and decode the returned WAV. Throws on failure. */
-export async function synthesizeViaBridge(req: OsSynthRequest, timeoutMs = 120_000): Promise<OsSynthResult> {
+export async function synthesizeViaBridge(req: OsSynthRequest, timeoutMs = 120_000, signal?: AbortSignal): Promise<OsSynthResult> {
+  signal?.throwIfAborted();
   const url = getBridgeUrl();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const abort = () => ctrl.abort(signal?.reason);
+  signal?.throwIfAborted();
+  signal?.addEventListener('abort', abort, { once: true });
   try {
     const res = await fetch(`${url}/synthesize`, {
       method: 'POST',
@@ -281,5 +289,6 @@ export async function synthesizeViaBridge(req: OsSynthRequest, timeoutMs = 120_0
     return { buffer, engine: res.headers.get('X-OS-TTS-Engine') ?? undefined };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
 }

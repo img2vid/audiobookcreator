@@ -4,7 +4,7 @@
 # Then push to `main` (or run this workflow manually from the Actions tab).
 #
 # Optional repository variable (Settings → Secrets and variables → Actions → Variables):
-#   AUTOBOOK_MODEL = 360m (default) | 135m | none
+#   AUTOBOOK_MODEL = 360m | 135m | none (default)
 #     Which AutoBook AI model to download from Hugging Face and bundle into the
 #     deployed site. The ONNX weights are far above GitHub's 100 MB file limit, so
 #     they are fetched during the build instead of being committed to git.
@@ -60,7 +60,7 @@ jobs:
         run: node scripts/fetch-assets.mjs ocr
 
       - name: Fetch AutoBook AI model (if not committed)
-        if: ${{ vars.AUTOBOOK_MODEL != 'none' }}
+        if: ${{ vars.AUTOBOOK_MODEL != '' && vars.AUTOBOOK_MODEL != 'none' }}
         continue-on-error: true
         run: node scripts/fetch-assets.mjs model ${{ vars.AUTOBOOK_MODEL || '360m' }}
 

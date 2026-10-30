@@ -144,17 +144,17 @@ interface AppState {
 }
 
 export const DEFAULT_PC_PROFILE: PCProfile = {
-  cpuBrand: 'intel',
+  cpuBrand: 'custom',
   cpuGeneration: '',
   cpuModel: '',
-  customCpu: { clockGhz: 3.4, cores: 8, threads: 16 },
+  customCpu: { clockGhz: 2, cores: 2, threads: 2 },
   gpuEnabled: false,
   gpuBrand: 'nvidia',
   gpuGeneration: '',
   gpuModel: '',
   customGpu: { vramGB: 8, teraflops: 15 },
-  ramGB: 16,
-  storage: 'nvme',
+  ramGB: 4,
+  storage: 'sata-ssd',
   os: 'windows',
 };
 
@@ -170,15 +170,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   localAiModelId: 'smollm2-360m-instruct',
   preferredVoiceURI: '',
   outputFormat: 'wav-16',
-  sampleRate: 44100,
+  sampleRate: 22050,
   channels: 1,
   notifications: true,
   longSessionGuard: true,
   telemetryLocal: true,
   highContrast: false,
   reducedMotion: false,
-  aiAssist: true,
-  aiAllowRemoteDownload: true,
+  aiAssist: false,
+  aiAllowRemoteDownload: false,
   aiDepth: 'light',
   aiAssistOcr: true,
   aiAssistTranscript: true,
@@ -211,7 +211,7 @@ const FALLBACK_TUNED: TunedSettings = {
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
-      view: 'dashboard',
+      view: 'book-desk',
       setView: (v) => set({ view: v }),
 
       pcProfile: DEFAULT_PC_PROFILE,

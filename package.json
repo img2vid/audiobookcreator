@@ -1,10 +1,10 @@
 {
   "name": "openmukti-audiobook-creator",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Openmukti Audiobook Creator — fully local, in-browser TTS, OCR, audiobook and video suite. Static site, deployable to GitHub Pages.",
+  "description": "Openmukti Audiobook Creator \u2014 fully local, in-browser TTS, OCR, audiobook and video suite. Static site, deployable to GitHub Pages.",
   "engines": {
-    "node": ">=20.9.0"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "dev": "next dev -p 3000",
@@ -14,12 +14,17 @@
     "start": "node scripts/serve-out.mjs",
     "os-tts": "node scripts/os-tts-server.mjs",
     "lint": "eslint .",
-    "test:engine": "node --experimental-loader ./tests/alias-loader.mjs tests/engine.test.mts",
+    "test:engine": "node --import ./tests/register-loader.mjs tests/engine.test.mts",
     "typecheck": "tsc --noEmit",
     "clean": "node -e \"for (const d of ['.next','out']) require('fs').rmSync(d,{recursive:true,force:true})\"",
     "prepare:local-assets": "node scripts/prepare-local-assets.mjs",
     "fetch:ocr": "node scripts/fetch-assets.mjs ocr",
-    "fetch:model": "node scripts/fetch-assets.mjs model"
+    "fetch:model": "node scripts/fetch-assets.mjs model",
+    "local": "node scripts/start-local.mjs",
+    "local:dev": "node scripts/start-local.mjs --dev",
+    "test": "npm run test:unit && npm run test:engine",
+    "test:unit": "node --import ./tests/register-loader.mjs --test tests/reliability.test.mts tests/local-services.test.mjs",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
@@ -55,6 +60,7 @@
     "cmdk": "^1.1.1",
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
+    "fflate": "0.8.2",
     "framer-motion": "^12.23.2",
     "geist": "^1.5.1",
     "input-otp": "^1.4.2",
@@ -77,11 +83,13 @@
     "zustand": "^5.0.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "^16.1.1",
+    "fake-indexeddb": "^6.2.4",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5"
@@ -92,5 +100,6 @@
     "sharp@0.34.5": true,
     "tesseract.js@7.0.0": true,
     "unrs-resolver@1.12.2": true
-  }
+  },
+  "type": "module"
 }

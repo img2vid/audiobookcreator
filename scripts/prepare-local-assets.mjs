@@ -49,6 +49,9 @@ const pdfWorker = findFirst([
   nm('pdfjs-dist', 'build', 'pdf.worker.min.mjs'),
 ]);
 if (pdfWorker) copy(pdfWorker, path.join(publicDir, 'pdfjs', 'pdf.worker.min.mjs'));
+for (const dir of ['cmaps', 'standard_fonts', 'wasm']) {
+  if (fs.existsSync(nm('pdfjs-dist', dir))) fs.cpSync(nm('pdfjs-dist', dir), path.join(publicDir, 'pdfjs', dir), { recursive: true });
+}
 
 // --- ONNX Runtime WASM (Transformers.js) ----------------------------------------
 // Copy EVERY variant. Transformers.js picks the loader/wasm pair at runtime

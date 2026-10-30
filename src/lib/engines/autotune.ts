@@ -339,7 +339,7 @@ export function autoTune(
     override !== 'auto' ? override : scoreOcrPower;
   const ramCap = ramPixelCap(profile.ramGB);
   const ocrMaxPixels = Math.round(Math.min(OCR_POWER_PIXEL_CAP[ocrPower], ramCap));
-  const ocrThreads = clamp(Math.round(cpu.cores / 2), 2, 8);
+  const ocrThreads = profile.ramGB <= 4 ? 1 : clamp(Math.round(cpu.cores / 2), 1, 8);
 
   // ----- TTS -----
   const ttsThreads = clamp(Math.round(cpu.cores / 4) + 1, 1, 8);
@@ -362,7 +362,7 @@ export function autoTune(
   // ----- memory / I/O / queue -----
   const cacheMB = clamp(Math.round(profile.ramGB * 16), 64, 2048);
   const ioBufferKB = IO_BUFFER_KB[profile.storage] ?? 512;
-  const queueConcurrency = clamp(Math.round(cpu.cores / 6 + 1), 1, 4);
+  const queueConcurrency = profile.ramGB <= 4 || cpu.cores <= 2 ? 1 : clamp(Math.floor(cpu.cores / 6), 1, 4);
   const videoExportPreset: TunedSettings['videoExportPreset'] =
     score >= 80 ? 'quality' : score >= 55 ? 'balanced' : 'fast';
   const gpuOffload = gpu !== null && (gpu.teraflops >= 8 || gpu.vramGB >= 6);
