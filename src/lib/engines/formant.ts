@@ -348,9 +348,9 @@ function wordToPhones(wordRaw: string): PhoneTok[] {
   // Split only longer words to avoid corrupting roots such as "sing" and "thing".
   const append = (stem: string, suffix: string): PhoneTok[] =>
     [...wordToPhones(stem), ...suffix.split(' ').map(key => ({ key, stress: false }))];
-  if (w.length > 6 && w.endsWith('tion')) return append(w.slice(0, -4), 'SH AH N');
-  if (w.length > 6 && w.endsWith('sion')) return append(w.slice(0, -4), 'ZH AH N');
-  if (w.length > 6 && w.endsWith('ture')) return append(w.slice(0, -4), 'CH ER');
+  if (w.length >= 6 && w.endsWith('tion')) return append(w.slice(0, -4), 'SH AH N');
+  if (w.length >= 6 && w.endsWith('sion')) return append(w.slice(0, -4), 'ZH AH N');
+  if (w.length >= 6 && w.endsWith('ture')) return append(w.slice(0, -4), 'CH ER');
   if (w.length > 5 && w.endsWith('ing')) {
     let stem = w.slice(0, -3);
     if (/([^aeiou])\1$/.test(stem)) stem = stem.slice(0, -1);
