@@ -2,7 +2,8 @@ import type { BookProject } from './book-plan';
 
 export interface BookChunk {
   id: string; projectId: string; chapterId: string; index: number; signature: string;
-  pcm: Blob; frames: number; sampleRate: number; engineLabel: string;
+  // New chunks use ArrayBuffer for WebKit IndexedDB compatibility. Existing Blob chunks remain readable.
+  pcm: ArrayBuffer | Blob; frames: number; sampleRate: number; engineLabel: string;
 }
 export type BookChunkInfo = Omit<BookChunk, 'pcm'>;
 const DB = 'openmukti-book-desk';
