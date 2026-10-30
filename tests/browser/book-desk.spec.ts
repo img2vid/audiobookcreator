@@ -5,7 +5,8 @@ import { readFile } from 'node:fs/promises';
 test('CPU-only real synthesis, WAV/ZIP download, reload and chunk reuse without remote requests', async ({ page, context, browserName }) => {
   const errors: string[] = [], external: string[] = [];
   page.on('pageerror', e => errors.push(e.message));
-  await context.route('**/*', route => {
+  // Intercept only network requests: blob: media previews are local and must not be routed.
+  await context.route(url => url.protocol === 'http:' || url.protocol === 'https:', route => {
     if (!new URL(route.request().url()).hostname.match(/^(127\.0\.0\.1|localhost)$/)) { external.push(route.request().url()); return route.abort(); }
     return route.continue();
   });
@@ -91,7 +92,8 @@ test('PDF.js extracts page text in operator order', async ({ page }) => {
 
 test('local Tesseract reads image text with no cloud fallback', async ({ page, context }) => {
   const external: string[] = [];
-  await context.route('**/*', route => {
+  // Intercept only network requests: blob: media previews are local and must not be routed.
+  await context.route(url => url.protocol === 'http:' || url.protocol === 'https:', route => {
     if (!new URL(route.request().url()).hostname.match(/^(127\.0\.0\.1|localhost)$/)) { external.push(route.request().url()); return route.abort(); }
     return route.continue();
   });
