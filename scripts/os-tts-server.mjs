@@ -897,11 +897,13 @@ const server = http.createServer(async (req, res) => {
         if (body[key] != null && (!Number.isFinite(body[key]) || body[key] < (key === 'rate' ? 0.1 : 0) || body[key] > (key === 'rate' ? 4 : key === 'pitch' ? 2 : 1))) { sendJson(res, 400, { error: `Invalid ${key}` }); return; }
       }
       if (body.engine && !ENGINES[body.engine]) { sendJson(res, 400, { error: 'Unknown speech engine' }); return; }
-      await refreshEngines(false);
-      if (res.destroyed) return;
+      // Reject invalid requests without awaiting expensive native voice discovery.
+      // On Windows, the first PowerShell/WinRT scan may take tens of seconds.
       const text = sanitizeText(body.text ?? '');
       if (!text.trim()) { sendJson(res, 400, { error: 'text is required' }); return; }
       if (text.length > MAX_TEXT_CHARS) { sendJson(res, 413, { error: `text exceeds ${MAX_TEXT_CHARS} chars — split it client-side` }); return; }
+      await refreshEngines(false);
+      if (res.destroyed) return;
 
       // Route by the VOICE first — a known voice name pinpoints exactly one
       // engine, whatever the client asked for. This keeps OLDER deployed app
