@@ -1,4 +1,22 @@
 ====================================================================
+ IMPORTANT UPDATE — SPEECH BRIDGE v7 (BALABOLKA CMD)
+====================================================================
+The text below is historical troubleshooting for the older v5 bridge.
+Current non-Piper synthesis uses only Balabolka CMD (balcon.exe) on
+Windows, not WinRT, System.Speech directly, espeak, say, or browser
+formant voices. Piper still works when explicitly selected.
+
+Install the separate Balabolka command-line utility from:
+  https://www.cross-plus-a.com/bconsole.htm
+Set BALABOLKA_CMD to the full balcon.exe path if it is not on PATH.
+Start the bridge with npm run os-tts or the entire app with npm run local.
+GET /ping reports bridge version 7, and GET /voices lists Balabolka and
+Piper voices. On macOS/Linux, explicitly select Piper; Balabolka CMD
+is Windows-only. See README.md for full current instructions.
+
+====================================================================
+
+====================================================================
  OPENMUKTI AUDIOBOOK CREATOR — patched software + OS Speech Bridge 5
 ====================================================================
 
