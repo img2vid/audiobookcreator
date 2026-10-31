@@ -1,58 +1,73 @@
 // ============================================================
 // OS Speech Bridge — client side.
-// Talks to the zero-dependency local companion server
-// (scripts/os-tts-server.mjs, `npm run os-tts`) that renders WAV files
-// with the ESTABLISHED speech engine installed with the operating system:
-//   Windows → Natural Voices (WinRT/OneCore: Aria, Jenny, …) + SAPI 5 (David, Zira)
-//   macOS   → Apple Speech (`say`)     Linux → espeak-ng / espeak
-//   any OS  → Piper neural voices
-//
-// The browser alone can synthesize OS voices for live preview (Web Speech
-// API) but CANNOT capture them into a file — this bridge is what makes
-// “the selected OS engine actually renders the export” possible.
+// Communicates with Balabolka CMD or Piper on a remote HTTPS server, or
+// with an optional loopback bridge. GitHub Pages cannot launch processes.
+// This client never bundles or executes Windows software in the browser.
 // ============================================================
 import type { OsTtsBridgeStatus, OsTtsEngineId, OsTtsVoiceDef } from '@/lib/types';
 
 const BRIDGE_URL_KEY = 'os-tts-bridge-url';
-export const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:8477';
+const HOSTED_BRIDGE_URL = (process.env.NEXT_PUBLIC_SPEECH_BRIDGE_URL || '').trim();
+export const DEFAULT_BRIDGE_URL = HOSTED_BRIDGE_URL || 'http://127.0.0.1:8477';
+// Tokens are entered by the user and kept only in memory for this browser tab.
+// NEVER put a server's master access token in NEXT_PUBLIC_*, Pages variables,
+// localStorage, a query string, or GitHub source control.
+let bridgeAccessToken = '';
+export function setBridgeAccessToken(token: string): void {
+  bridgeAccessToken = token.trim();
+  invalidateBridgeCache();
+}
+export function hasBridgeAccessToken(): boolean { return !!bridgeAccessToken; }
+function bridgeHeaders(): Record<string, string> {
+  return bridgeAccessToken ? { Authorization: `Bearer ${bridgeAccessToken}` } : {};
+}
 
 /**
  * Accept loose human input ("127.0.0.1", "localhost", "localhost:8477") and
  * turn it into a full bridge URL. Bare loopback hosts get the default port.
  */
 export function normalizeBridgeUrl(input: string): string {
-  let v = input.trim().replace(/\/+$/, '');
-  if (!v) return '';
-  if (!/^https?:\/\//i.test(v)) v = `http://${v}`;
+  const raw = input.trim().replace(/\\/+$/, '');
+  if (!raw) return '';
+  const isLocal = /^(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d+)?(?:\\/|$)/i.test(raw);
+  const candidate = /^https?:\\/\\//i.test(raw) ? raw : `${isLocal ? 'http' : 'https'}://${raw}`;
   try {
-    const u = new URL(v);
-    if (!u.port && /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)) {
-      u.port = '8477';
-    }
-    return u.toString().replace(/\/+$/, '');
-  } catch {
-    return v;
-  }
+    const u = new URL(candidate);
+    if (u.protocol !== 'https:' && (u.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname))) return '';
+    if (u.username || u.password || u.search || u.hash) return '';
+    if (!u.port && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) u.port = '8477';
+    return u.toString().replace(/\\/+$/, '');
+  } catch { return ''; }
 }
 
-/** User-configurable bridge URL (localStorage; falls back to the default). */
+/** Hosted GitHub Pages sites never default to a visitor's localhost. */
 export function getBridgeUrl(): string {
-  if (typeof window === 'undefined') return DEFAULT_BRIDGE_URL;
+  if (typeof window === 'undefined') return normalizeBridgeUrl(DEFAULT_BRIDGE_URL);
   try {
-    const v = window.localStorage.getItem(BRIDGE_URL_KEY);
-    return v && /^https?:\/\//i.test(v) ? v.replace(/\/+$/, '') : DEFAULT_BRIDGE_URL;
+    const stored = window.localStorage.getItem(BRIDGE_URL_KEY);
+    if (stored) {
+      const url = normalizeBridgeUrl(stored);
+      if (url) return url;
+    }
+    if (HOSTED_BRIDGE_URL) return normalizeBridgeUrl(HOSTED_BRIDGE_URL);
+    if (window.location.hostname.endsWith('.github.io')) return '';
+    return 'http://127.0.0.1:8477';
   } catch {
-    return DEFAULT_BRIDGE_URL;
+    return normalizeBridgeUrl(HOSTED_BRIDGE_URL) || '';
   }
 }
 
 export function setBridgeUrl(url: string): void {
   if (typeof window === 'undefined') return;
+  const clean = normalizeBridgeUrl(url);
+  if (url.trim() && !clean) throw new Error('Hosted speech URLs must use HTTPS (HTTP allowed only for localhost) and cannot include credentials or query strings.');
   try {
-    const clean = normalizeBridgeUrl(url);
-    if (!clean || clean === DEFAULT_BRIDGE_URL) window.localStorage.removeItem(BRIDGE_URL_KEY);
+    if (!clean || clean === normalizeBridgeUrl(DEFAULT_BRIDGE_URL)) window.localStorage.removeItem(BRIDGE_URL_KEY);
     else window.localStorage.setItem(BRIDGE_URL_KEY, clean);
-  } catch { /* private mode — ignore */ }
+    invalidateBridgeCache();
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('Hosted speech URLs')) throw err;
+  }
 }
 
 // ---------- capability table ----------
@@ -97,6 +112,7 @@ export function invalidateBridgeCache(): void {
  */
 export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
   const url = getBridgeUrl();
+  if (!url) return { status: { url: '', ok: false, error: 'No hosted speech server configured. Ask the site operator to deploy the Windows Balabolka backend and set NEXT_PUBLIC_SPEECH_BRIDGE_URL.' }, voices: [] };
   if (!force && cached && Date.now() - cached.at < CACHE_MS) return cached.result;
   if (inFlight) return inFlight;
   inFlight = (async (): Promise<ProbeResult> => {
@@ -105,8 +121,8 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
     try {
       // 10 s: a cold bridge answers /ping instantly, but on some Windows boxes
       // even process startup can lag — do not give up before it had a chance.
-      const res = await fetch(`${url}/ping`, { signal: ctrl.signal, cache: 'no-store' });
-      if (!res.ok) throw new Error(`bridge /ping → HTTP ${res.status}`);
+      const res = await fetch(`${url}/ping`, { headers: bridgeHeaders(), signal: ctrl.signal, cache: 'no-store' });
+      if (!res.ok) throw new Error(res.status === 401 ? 'Hosted Balabolka server requires an access token. Enter it in Engine & Voice settings.' : `bridge /ping → HTTP ${res.status}`);
       const info = (await res.json()) as {
         ok?: boolean; platform?: string; engines?: Record<string, boolean>;
         engineInfo?: OsTtsBridgeStatus['engineInfo']; voiceCount?: number;
@@ -122,7 +138,7 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
       let voices: OsTtsVoiceDef[] = [];
       if (status.ok) {
         try {
-          const vres = await fetch(`${url}/voices`, { cache: 'no-store', signal: ctrl.signal });
+          const vres = await fetch(`${url}/voices`, { headers: bridgeHeaders(), cache: 'no-store', signal: ctrl.signal });
           if (vres.ok) {
             const data = (await vres.json()) as { voices?: OsTtsVoiceDef[] };
             voices = Array.isArray(data.voices) ? data.voices : [];
@@ -247,6 +263,7 @@ export interface OsSynthResult {
 export async function synthesizeViaBridge(req: OsSynthRequest, timeoutMs = 120_000, signal?: AbortSignal): Promise<OsSynthResult> {
   signal?.throwIfAborted();
   const url = getBridgeUrl();
+  if (!url) throw new Error('No hosted Balabolka server configured. The site operator must provide NEXT_PUBLIC_SPEECH_BRIDGE_URL.');
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const abort = () => ctrl.abort(signal?.reason);
@@ -255,7 +272,7 @@ export async function synthesizeViaBridge(req: OsSynthRequest, timeoutMs = 120_0
   try {
     const res = await fetch(`${url}/synthesize`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bridgeHeaders() },
       body: JSON.stringify(req),
       signal: ctrl.signal,
     });
