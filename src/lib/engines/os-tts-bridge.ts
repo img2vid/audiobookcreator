@@ -27,16 +27,16 @@ function bridgeHeaders(): Record<string, string> {
  * turn it into a full bridge URL. Bare loopback hosts get the default port.
  */
 export function normalizeBridgeUrl(input: string): string {
-  const raw = input.trim().replace(/\\/+$/, '');
+  const raw = input.trim().replace(/\/+$/, '');
   if (!raw) return '';
-  const isLocal = /^(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d+)?(?:\\/|$)/i.test(raw);
-  const candidate = /^https?:\\/\\//i.test(raw) ? raw : `${isLocal ? 'http' : 'https'}://${raw}`;
+  const isLocal = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(raw);
+  const candidate = /^https?:\/\//i.test(raw) ? raw : (isLocal ? 'http://' : 'https://') + raw;
   try {
     const u = new URL(candidate);
     if (u.protocol !== 'https:' && (u.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname))) return '';
     if (u.username || u.password || u.search || u.hash) return '';
     if (!u.port && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) u.port = '8477';
-    return u.toString().replace(/\\/+$/, '');
+    return u.toString().replace(/\/+$/, '');
   } catch { return ''; }
 }
 
