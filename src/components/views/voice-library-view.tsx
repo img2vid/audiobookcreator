@@ -128,42 +128,47 @@ export function VoiceLibraryView() {
   }, [customProfiles, query]);
 
   const previewSystemVoice = (v: SpeechSynthesisVoice) => {
-    if (!isSpeechSynthesisAvailable()) return;
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance('Hello from Openmukti Audiobook Creator. This voice runs entirely on your machine.');
-    u.voice = v;
-    u.rate = 1;
-    window.speechSynthesis.speak(u);
     setPreviewing(v.voiceURI);
-    u.onend = () => setPreviewing(null);
+    void (async () => {
+      try {
+        const probe = await probeOsTtsBridge();
+        if (!probe.status.ok) throw new Error('Start the Balabolka bridge with npm run os-tts.');
+        const selected = probe.voices.find((voice) => voice.engine === 'balabolka' && voice.name.toLowerCase() === v.name.toLowerCase())
+          ?? probe.voices.find((voice) => voice.engine === 'balabolka');
+        if (!selected) throw new Error('No Balabolka CMD voice available.');
+        const result = await synthesizeViaBridge({
+          engine: 'balabolka', voice: selected.name,
+          text: 'Hello from Openmukti Audiobook Creator. This voice runs entirely on your machine.',
+        });
+        const ctx = new AudioContext();
+        const src = ctx.createBufferSource();
+        src.buffer = result.buffer;
+        src.connect(ctx.destination);
+        src.onended = () => { setPreviewing(null); void ctx.close(); };
+        src.start();
+      } catch (err) {
+        setPreviewing(null);
+        toast({ title: 'Balabolka preview failed', description: String(err), variant: 'destructive' });
+      }
+    })();
   };
 
-  /** Audition through the ESTABLISHED OS engine when the bridge is running —
-   *  the exact voice this profile maps to in renders — falling back to the
-   *  built-in formant synth only when no OS engine is reachable. */
+  /** Audition profiles through Balabolka CMD; never substitute a formant voice. */
   const auditionBestEngine = async (
     text: string,
     profileId: string,
     gender: VoiceProfileDef['gender'] | undefined,
-    formantRender: () => Promise<AudioBuffer>,
+    _formantRender: () => Promise<AudioBuffer>,
   ): Promise<{ buffer: AudioBuffer; viaBridge: boolean; label?: string }> => {
-    try {
-      const probe = await probeOsTtsBridge();
-      if (probe.status.ok && probe.voices.length > 0) {
-        const voice = pickOsVoiceForProfile(probe.voices, profileId, gender, 'en');
-        if (voice) {
-          const res = await synthesizeViaBridge({
-            engine: voice.engine as OsTtsEngineId,
-            voice: voice.name,
-            text,
-          });
-          return { buffer: res.buffer, viaBridge: true, label: `${voice.engine} · ${voice.name}` };
-        }
-      }
-    } catch {
-      // bridge unreachable → formant fallback below
-    }
-    return { buffer: await formantRender(), viaBridge: false };
+    const probe = await probeOsTtsBridge();
+    if (!probe.status.ok) throw new Error('Start the local Balabolka speech bridge with npm run os-tts.');
+    const bridgeVoices = probe.voices.filter((v) => v.engine === 'balabolka');
+    const voice = pickOsVoiceForProfile(bridgeVoices, profileId, gender, 'en');
+    if (!voice) throw new Error('No Balabolka CMD voice found. Install balcon.exe and configure BALABOLKA_CMD.');
+    const res = await synthesizeViaBridge({
+      engine: 'balabolka', voice: voice.name, text,
+    });
+    return { buffer: res.buffer, viaBridge: true, label: `Balabolka CMD · ${voice.name}` };
   };
 
   const previewProfile = async (profileId: string, name: string) => {
@@ -175,12 +180,7 @@ export function VoiceLibraryView() {
           profileId, rate: 1, pitch: 1, volume: 1, quality: 'balanced',
         }),
       );
-      if (!audition.viaBridge) {
-        toast({
-          title: 'Previewed with the built-in synth',
-          description: 'Start the OS bridge (npm run os-tts) to audition this profile with the real OS voice it maps to.',
-        });
-      }
+      
       const ctx = new AudioContext();
       const src = ctx.createBufferSource();
       src.buffer = audition.buffer;
@@ -282,12 +282,7 @@ export function VoiceLibraryView() {
           rate: 1, pitch: 1, volume: 1, quality: 'fast',
         }),
       );
-      if (!audition.viaBridge) {
-        toast({
-          title: 'Previewed with the built-in synth',
-          description: 'Start the OS bridge (npm run os-tts) to audition this profile with the real OS voice it maps to.',
-        });
-      }
+      
       const ctx = new AudioContext();
       const src = ctx.createBufferSource();
       src.buffer = audition.buffer;
