@@ -1,7 +1,8 @@
 # Openmukti Audiobook Creator 0.4
 
-Local document-to-audiobook software with a browser GUI and optional OS speech
-companion. No GPU, cloud account or AI model is needed for the basic workflow.
+Local document-to-audiobook software with a browser GUI and a local speech
+companion. Balabolka CMD (Windows) renders non-Piper speech; Piper can be
+selected explicitly. Neither engine requires a GPU.
 
 ## Run locally
 
@@ -35,7 +36,7 @@ in your environment before `npm ci`.
    Tesseract LSTM, bundled worker/WASM/language files, and one CPU worker.
 3. Choose **Create book**. Headings become chapters; long chapters become parts
    of up to 6,000 characters. A preface and all text are retained.
-4. Choose the built-in English voice or an installed OS/Piper voice. Set rate,
+4. Choose an installed Balabolka CMD voice or a Piper voice. Set rate,
    pitch and volume; add literal pronunciation substitutions if needed.
 5. **Render / resume book** processes short chunks sequentially. Pause takes
    effect between chunks; Stop cancels bridge requests and discards any unfinished
@@ -54,27 +55,45 @@ book/part title do not regenerate speech. Save edits before leaving. A project
 JSON backup includes source text/settings/dictionary, **not** audio. Restoring
 one creates a separate project. A complete book ZIP preserves the finished WAVs.
 
-## Voices and CPU-only operation
+## Balabolka CMD (default) and Piper (optional)
 
-| Option | Windows | macOS | Linux | GPU |
-| --- | --- | --- | --- | --- |
-| Built-in English formant voice | Browser | Browser | Browser | None |
-| OS speech bridge | SAPI / available WinRT voices | Installed `say` voices | Install `espeak-ng` or `espeak` | None |
-| Piper through bridge | Optional installation and voice files | Optional installation and voice files | Optional installation and voice files | None required |
+All non-Piper speech generation uses **Balabolka's separate command-line
+utility** (`balcon.exe`): book rendering, TTS Studio, dialogue and character
+voice previews. Piper is used only when its model or voice is selected.
+There is **no silent fallback to the old robotic formant renderer**.
 
-The built-in voice is **robotic English speech**, not a neural voice. OS voices
-vary by machine and installed language packs. Not every Windows Natural/Siri
-voice is exposed for file synthesis. Piper quality and performance depend on the
-installed voice model. For Linux OS speech, for example: `sudo apt install espeak-ng`.
-Piper models must be registered in `PIPER_VOICES_DIR` or the bridge's documented
-voice search directories. No model is downloaded automatically by Book Desk.
+**Windows setup:** get the command-line utility from
+https://www.cross-plus-a.com/bconsole.htm and extract `balcon.exe` into a
+folder of your choice. It is a **separate tool**, not the `balabolka.exe`
+desktop app. Put `balcon.exe` on PATH, or set its path in PowerShell before
+launching the app:
 
-Web Speech voices are useful for previews but browsers cannot capture their audio
-as downloadable files. File rendering with OS voices needs the local bridge.
-The new desk stops on an unavailable selected engine instead of changing voices
-silently. Pitch is unsupported by macOS `say` and Piper; volume is applied to
-those results in the browser. Multi-language books need the appropriate installed
-OS voice and language code. The built-in engine supports English only.
+```powershell
+$env:BALABOLKA_CMD = 'C:\Tools\Balabolka\balcon.exe'
+npm run local
+```
+
+The bridge also searches common Balabolka install locations. To inspect
+installed Windows SAPI voices, run `& $env:BALABOLKA_CMD -l` and choose an
+available voice in the app. Balabolka does not create new neural voices:
+audio quality is determined by the SAPI/Microsoft Speech Platform voices
+already installed on the machine.
+
+**macOS/Linux:** Balabolka CMD is Windows-only. Select Piper and install its
+binary and `.onnx` voice models. Optionally configure `PIPER_VOICES_DIR`.
+The app reports a clear error when the selected engine is unavailable.
+
+**Verification:** start the app with `npm run local`, or run
+`npm run os-tts` alongside the GUI. Check
+http://127.0.0.1:8477/ping for `"balabolka":true` or `"piper":true`
+and http://127.0.0.1:8477/voices for available voices.
+Both engines run on CPU offline after installation; a hosted website cannot
+execute a local program without the running bridge.
+
+Balabolka CMD is distributed separately under the publisher's own license;
+check the license before commercial use or redistribution. The project does
+not bundle it. Previously cached robotic book chunks are invalidated on the
+next render instead of silently being reused.
 
 Conservative defaults target modest computers: no GPU, one queued heavy task,
 one OCR worker, 22,050 Hz mono output, 600-character render chunks, and optional
