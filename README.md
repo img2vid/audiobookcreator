@@ -57,12 +57,22 @@ one creates a separate project. A complete book ZIP preserves the finished WAVs.
 
 ## Balabolka CMD (default) and Piper (optional)
 
+**Hosted GitHub Pages mode:** The browser can call a separately hosted
+Windows Balabolka CMD service over HTTPS. Visitors do **not** install
+Balabolka or a local companion. The site operator must first provision a
+Windows server, configure authentication and set the nonsecret GitHub Actions
+repository variable `SPEECH_BRIDGE_URL=https://<your-hostname>`. Read
+[Hosted Balabolka deployment](docs/HOSTED_BALABOLKA.md) for the full setup.
+GitHub Pages itself cannot execute Windows software or act as a permanent
+speech server. A GitHub Pages build without a hosted URL shows a setup
+message rather than silently sending requests to visitors' localhost.
+
 All non-Piper speech generation uses **Balabolka's separate command-line
 utility** (`balcon.exe`): book rendering, TTS Studio, dialogue and character
 voice previews. Piper is used only when its model or voice is selected.
 There is **no silent fallback to the old robotic formant renderer**.
 
-**Windows setup:** get the command-line utility from
+**Local development or Windows speech-host setup:** get the command-line utility from
 https://www.cross-plus-a.com/bconsole.htm and extract `balcon.exe` into a
 folder of your choice. It is a **separate tool**, not the `balabolka.exe`
 desktop app. Put `balcon.exe` on PATH, or set its path in PowerShell before
@@ -83,12 +93,12 @@ already installed on the machine.
 binary and `.onnx` voice models. Optionally configure `PIPER_VOICES_DIR`.
 The app reports a clear error when the selected engine is unavailable.
 
-**Verification:** start the app with `npm run local`, or run
+**Local-mode verification:** start the app with `npm run local`, or run
 `npm run os-tts` alongside the GUI. Check
 http://127.0.0.1:8477/ping for `"balabolka":true` or `"piper":true`
 and http://127.0.0.1:8477/voices for available voices.
-Both engines run on CPU offline after installation; a hosted website cannot
-execute a local program without the running bridge.
+Both engines run on CPU after installation. For hosted use, the bridge runs
+on the Windows server behind an HTTPS reverse proxy, not on visitors' computers.
 
 Balabolka CMD is distributed separately under the publisher's own license;
 check the license before commercial use or redistribution. The project does
