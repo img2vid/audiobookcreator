@@ -35,12 +35,8 @@ import { parseVoiceMarkup } from '@/lib/engines/markup';
 
 /** Engine priority when auto-picking a bridge voice (realism first). */
 const ENGINE_PRIORITY: Record<OsTtsEngineId, number> = {
-  piper: 50,
-  winrt: 45, // Windows Natural Voices (Aria, Jenny, Guy…) beat legacy SAPI
-  sapi: 40,
-  say: 35,
-  'espeak-ng': 20,
-  espeak: 15,
+  balabolka: 40, piper: 50, winrt: 0, sapi: 0, say: 0, 'espeak-ng': 0, espeak: 0, 
+
 };
 
 export function voiceClassForModel(model: TTSModelDef | undefined): SystemVoiceClass {
@@ -176,9 +172,9 @@ export interface DispatchOptions {
   pitch: number;
   volume: number;
   quality: 'fast' | 'balanced' | 'high' | 'max';
-  /** Force the bundled formant engine (settings.fallbackMode). */
+  /** Legacy setting; ignored because non-Piper synthesis must use Balabolka CMD. */
   forceFallback?: boolean;
-  /** When the bridge is down: true → fall back to formant with a reason; false → throw. */
+  /** Legacy setting; the dispatcher always reports a bridge error instead of using formant. */
   fallbackOnBridgeUnavailable?: boolean;
   onProgress?: (p: number) => void;
 }
@@ -199,56 +195,29 @@ export async function synthesizeWithSelectedEngine(
   opts: DispatchOptions,
 ): Promise<TtsRenderResult> {
   opts.signal?.throwIfAborted();
-  const { model } = opts;
-  const useOsEngine = !opts.forceFallback && model.engine !== 'formant';
-
-  if (useOsEngine) {
-    const probe = await probeOsTtsBridge();
-    if (probe.status.ok && probe.voices.length > 0) {
-      try {
-        return await renderViaOsBridge(text, opts, probe.voices);
-      } catch (err) {
-        opts.signal?.throwIfAborted();
-        if (!opts.fallbackOnBridgeUnavailable) throw err;
-        const reason = `OS engine render failed (${err instanceof Error ? err.message : String(err)}) — rendered with the bundled engine instead.`;
-        const buf = await renderViaFormant(text, opts);
-        return {
-          buffer: buf, engineUsed: 'fallback', engineLabel: 'AuraVoice built-in (fallback)',
-          chars: text.length, durationSec: buf.duration, fallbackReason: reason,
-        };
-      }
-    }
-    if (!opts.fallbackOnBridgeUnavailable) {
-      throw new OsBridgeUnavailableError(
-        `The OS speech bridge is not running at ${probe.status.url}. Start it with: npm run os-tts`,
-      );
-    }
-    const reason = model.engine === 'os-bridge'
-      ? `OS engine not reachable (start the bridge: npm run os-tts) — rendered with the bundled engine.`
-      : `OS voices cannot be captured to files from the browser alone (start the bridge: npm run os-tts) — rendered with the bundled engine.`;
-    const buf = await renderViaFormant(text, opts);
-    return {
-      buffer: buf, engineUsed: 'fallback', engineLabel: 'AuraVoice built-in (fallback)',
-      chars: text.length, durationSec: buf.duration, fallbackReason: reason,
-    };
+  const requestedEngine: OsTtsEngineId = (
+    opts.model.id === 'os-piper-neural' ||
+    opts.osVoiceId?.startsWith('piper:') ||
+    opts.voiceURI?.startsWith('piper:')
+  ) ? 'piper' : 'balabolka';
+  // All synthesis, including former formant/"fallback" modes, now goes
+  // through the same local bridge. Never silently return the robotic voice.
+  const probe = await probeOsTtsBridge();
+  if (!probe.status.ok) {
+    throw new OsBridgeUnavailableError(
+      `Local Balabolka/Piper bridge is not available at ${probe.status.url}. Start it with npm run os-tts.`,
+    );
   }
+  const availableVoices = probe.voices.filter(v => v.engine === requestedEngine);
+  if (!availableVoices.length) {
+    throw new OsBridgeUnavailableError(
+      requestedEngine === 'piper'
+        ? 'No Piper voice model available. Install Piper and its .onnx voice models.'
+        : 'No Balabolka voices available. Install balcon.exe on Windows and configure BALABOLKA_CMD; select Piper on other operating systems.',
+    );
+  }
+  return renderViaOsBridge(text, opts, availableVoices);
 
-  const buf = await renderViaFormant(text, opts);
-  return { buffer: buf, engineUsed: 'fallback', engineLabel: 'AuraVoice built-in', chars: text.length, durationSec: buf.duration };
-}
-
-async function renderViaFormant(
-  text: string,
-  opts: DispatchOptions,
-): Promise<AudioBuffer> {
-  const { synthesizeWithMarkup } = await import('@/lib/engines/markup');
-  return synthesizeWithMarkup(text, {
-    profileId: opts.profileId,
-    rate: opts.rate,
-    pitch: opts.pitch,
-    volume: opts.volume,
-    quality: opts.quality,
-  }, p => { opts.signal?.throwIfAborted(); opts.onProgress?.(p); });
 }
 
 async function renderViaOsBridge(
@@ -258,8 +227,17 @@ async function renderViaOsBridge(
 ): Promise<TtsRenderResult> {
   // 1. resolve the OS voice — explicit pick wins, else map the profile
   let voice: OsTtsVoiceDef | undefined;
-  if (opts.osVoiceId) voice = bridgeVoices.find((v) => v.id === opts.osVoiceId);
-  if (opts.osVoiceId && !voice) throw new Error('The selected OS voice is no longer installed. Refresh voices and choose another.');
+  if (opts.osVoiceId) {
+    voice = bridgeVoices.find((v) => v.id === opts.osVoiceId);
+    // Older projects often stored sapi:/winrt: voice ids. Keep the same
+    // installed SAPI voice name, but render it with Balabolka instead.
+    if (!voice && !opts.osVoiceId.startsWith('piper:')) {
+      const wantedName = opts.osVoiceId.replace(/^[^:]+:/, '');
+      voice = bridgeVoices.find((v) => v.name.toLowerCase() === wantedName.toLowerCase());
+    }
+    if (opts.osVoiceId.startsWith('piper:') && !voice)
+      throw new Error('The selected Piper voice is no longer installed.');
+  }
   if (!voice && opts.voiceURI) voice = bridgeVoices.find((v) => v.id === opts.voiceURI);
   const voiceClass = voiceClassForModel(opts.model);
   const filtered = bridgeVoices.filter(v => voiceClass === 'any' || (voiceClass === 'neural' ? v.neural : !v.neural));
