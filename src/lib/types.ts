@@ -189,7 +189,7 @@ export interface SpeakOptions {
 }
 
 // ---------- OS speech bridge (established OS engines via local server) ----------
-export type OsTtsEngineId = 'sapi' | 'winrt' | 'say' | 'espeak-ng' | 'espeak' | 'piper';
+export type OsTtsEngineId = 'balabolka' | 'sapi' | 'winrt' | 'say' | 'espeak-ng' | 'espeak' | 'piper';
 export interface OsTtsVoiceDef {
   id: string;
   engine: OsTtsEngineId;
