@@ -38,16 +38,15 @@ test('bridge: loopback policy, validation, CPU admission control and disconnect 
     const stub = `#!/usr/bin/env node
 import fs from 'node:fs';
 const a=process.argv.slice(2);
-if(a.includes('--voices')) { console.log('Pty Language Age/Gender VoiceName File'); console.log(' 5 en M Fixture fixture'); process.exit(0); }
-let text=''; process.stdin.setEncoding('utf8'); process.stdin.on('data',d=>text+=d); process.stdin.on('end',()=>{
+if(a.includes('-l')) { console.log('Microsoft Zira Desktop'); console.log('Microsoft David Desktop'); process.exit(0); }
+const text = fs.readFileSync(a[a.indexOf('-f')+1], 'utf8');
 const b=Buffer.alloc(444); b.write('RIFF'); b.writeUInt32LE(436,4); b.write('WAVEfmt ',8); b.writeUInt32LE(16,16); b.writeUInt16LE(1,20); b.writeUInt16LE(1,22); b.writeUInt32LE(22050,24); b.writeUInt32LE(44100,28); b.writeUInt16LE(2,32); b.writeUInt16LE(16,34); b.write('data',36); b.writeUInt32LE(400,40);
 setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?10000:20);
-});
 `;
-    fs.writeFileSync(path.join(dir, 'espeak-ng'), stub, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, 'balcon-stub'), stub, { mode: 0o755 });
   }
   const reserve = net.createServer(); const address = await listen(reserve); const port = new URL(address).port; await new Promise(resolve => reserve.close(resolve));
-  const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: port, PATH: dir + path.delimiter + process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: port, BALABOLKA_CMD: process.platform === 'win32' ? '' : path.join(dir, 'balcon-stub'), PATH: dir + path.delimiter + process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = ''; child.stdout.on('data', d => { logs += d; }); child.stderr.on('data', d => { logs += d; });
   const url = `http://127.0.0.1:${port}`;
   const post = (body, options = {}) => fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body), ...options });
@@ -60,18 +59,28 @@ setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?1
     assert.equal((await post('{')).status, 400);
     assert.equal((await post({ text: 'test', volume: 4 })).status, 400);
     assert.equal((await post({ text: 'test', engine: 'fake-engine' })).status, 400);
+    assert.equal((await post({ text: 'test', engine: 'espeak-ng' })).status, 400);
     // Invalid input must fail promptly even while Windows voice discovery is running.
     assert.equal((await post({ text: 'a'.repeat(25001) }, { signal: AbortSignal.timeout(5000) })).status, 413);
     if (process.platform !== 'win32') {
-      await fetch(`${url}/voices`);
-      const audio = await post({ engine: 'espeak-ng', voice: 'Fixture', text: 'hello' }); assert.equal(audio.status, 200); assert.equal((await audio.arrayBuffer()).byteLength, 444);
+      const voiceResponse = await fetch(`${url}/voices`);
+      const voices = (await voiceResponse.json()).voices;
+      assert.ok(voices.some(v => v.id === 'balabolka:Microsoft Zira Desktop'));
+      assert.ok(voices.every(v => v.engine === 'balabolka' || v.engine === 'piper'));
+      const audio = await post({ engine: 'balabolka', voice: 'Microsoft Zira Desktop', text: 'hello 👋' });
+      assert.equal(audio.status, 200);
+      assert.equal(audio.headers.get('x-os-tts-engine'), 'balabolka');
+      assert.equal((await audio.arrayBuffer()).byteLength, 444);
+      const autodetect = await post({ text: 'hello' });
+      assert.equal(autodetect.headers.get('x-os-tts-engine'), 'balabolka');
+      await autodetect.arrayBuffer();
       const ctrl = new AbortController();
-      const hanging = fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'espeak-ng', text: 'slow' }), signal: ctrl.signal }).catch(() => null);
+      const hanging = fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'balabolka', text: 'slow' }), signal: ctrl.signal }).catch(() => null);
       await new Promise(r => setTimeout(r, 150));
-      assert.equal((await post({ engine: 'espeak-ng', text: 'hello' })).status, 429);
+      assert.equal((await post({ engine: 'balabolka', text: 'hello' })).status, 429);
       ctrl.abort(); await hanging;
       let retried;
-      for (let i = 0; i < 50; i++) { await new Promise(r => setTimeout(r, 50)); retried = await post({ engine: 'espeak-ng', text: 'hello' }); if (retried.status !== 429) break; }
+      for (let i = 0; i < 50; i++) { await new Promise(r => setTimeout(r, 50)); retried = await post({ engine: 'balabolka', text: 'hello' }); if (retried.status !== 429) break; }
       assert.equal(retried.status, 200);
     }
   } finally {
