@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '@/lib/stores/app-store';
-import { groupVoicesByLang, listNeuralVoices, listSystemVoices, isSpeechSynthesisAvailable } from '@/lib/engines/speech';
+import { groupVoicesByLang } from '@/lib/engines/speech';
 import {
   VOICE_PROFILES,
   allVoiceProfiles,
@@ -86,13 +86,17 @@ export function VoiceLibraryView() {
 
   useEffect(() => {
     const load = () => {
-      void listSystemVoices().then((v) => {
-        setVoices(v);
-        setEngine({ systemVoices: v.length });
+      void probeOsTtsBridge(true).then(({ voices: bridgeVoices }) => {
+        const localVoices = bridgeVoices.filter(v => v.engine === 'balabolka')
+          .map((v) => ({
+            name: v.name, lang: v.lang, voiceURI: v.id, localService: true, default: false,
+          } as SpeechSynthesisVoice));
+        setVoices(localVoices);
+        setEngine({ systemVoices: localVoices.length });
       });
     };
     load();
-    const t = setInterval(load, 4000);
+    const t = setInterval(load, 20_000);
     return () => clearInterval(t);
   }, []);
 
@@ -331,7 +335,7 @@ export function VoiceLibraryView() {
         <Tabs defaultValue="models">
           <TabsList>
             <TabsTrigger value="models"><Brain className="mr-1.5 h-4 w-4" />Models ({filteredModels.length})</TabsTrigger>
-            <TabsTrigger value="system"><Mic2 className="mr-1.5 h-4 w-4" />System voices ({voices.length})</TabsTrigger>
+            <TabsTrigger value="system"><Mic2 className="mr-1.5 h-4 w-4" />Balabolka voices ({voices.length})</TabsTrigger>
             <TabsTrigger value="profiles"><Bot className="mr-1.5 h-4 w-4" />Built-in profiles ({VOICE_PROFILES.length})</TabsTrigger>
           </TabsList>
 
@@ -369,20 +373,16 @@ export function VoiceLibraryView() {
           </TabsContent>
 
           <TabsContent value="system">
-            {!isSpeechSynthesisAvailable() ? (
+            {voices.length === 0 ? (
               <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-                This browser does not expose the Speech Synthesis API. The built-in formant engine remains fully available.
-              </div>
-            ) : voices.length === 0 ? (
-              <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-                Scanning for system voices… if none appear, your OS may have no TTS voices installed.
+                No Balabolka voices detected. Start npm run os-tts and install Balabolka CMD (balcon.exe) on Windows.
               </div>
             ) : (
               <ScrollArea className="max-h-[30rem] pr-3">
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
-                    {neural.length} neural-quality voice{neural.length === 1 ? '' : 's'} detected — these give the best AI results.
+                    {voices.length} installed Balabolka SAPI voice{voices.length === 1 ? '' : 's'} available for preview and export.
                   </div>
                   {Array.from(filteredVoices.entries()).map(([lang, list]) => (
                     <div key={lang}>
@@ -395,7 +395,7 @@ export function VoiceLibraryView() {
                                 {v.name}
                                 {/neural|natural|premium|enhanced|siri/i.test(v.name) && <Badge variant="secondary" className="h-4 px-1 text-[9px] text-emerald-600">neural</Badge>}
                               </div>
-                              <div className="text-[11px] text-muted-foreground">{v.lang} · {v.localService ? 'local (offline-capable)' : 'network voice'}</div>
+                              <div className="text-[11px] text-muted-foreground">{v.lang} · local Windows SAPI voice via Balabolka CMD</div>
                             </div>
                             <Button size="icon" variant="ghost" className="h-8 w-8" aria-label={`Preview ${v.name}`} onClick={() => previewSystemVoice(v)}>
                               {previewing === v.voiceURI ? <Volume2 className="h-4 w-4 animate-pulse text-violet-600" /> : <Play className="h-3.5 w-3.5" />}
