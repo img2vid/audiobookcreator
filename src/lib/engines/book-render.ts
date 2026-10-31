@@ -29,8 +29,6 @@ export async function renderBook(project: BookProject, opts: {
     opts.signal.throwIfAborted();
     const saved = await getBook(project.id);
     if (!saved || saved.updatedAt !== project.updatedAt) throw new Error('This project changed in another tab. Reopen it before rendering.');
-    if (project.engine === 'builtin' && !/^en(?:$|-)/i.test(project.language)) throw new Error('The built-in voice supports English. Select an installed OS voice for other languages.');
-    if (project.engine === 'builtin' && project.chapters.some(c => /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(c.text))) throw new Error('This book contains a non-Latin script. Choose an installed OS voice and the appropriate language code.');
     const chapters = project.chapters.filter(c => !opts.chapterId || c.id === opts.chapterId);
     const total = chapters.reduce((n, c) => n + splitBookText(c.text, project.chunkChars).filter(t => t.trim()).length, 0);
     let done = 0, reused = 0;
@@ -38,7 +36,7 @@ export async function renderBook(project: BookProject, opts: {
       const chunks = splitBookText(chapter.text, project.chunkChars).filter(t => t.trim());
       for (let index = 0; index < chunks.length; index++) {
         await opts.waitWhilePaused(); abort.signal.throwIfAborted();
-        const text = chunks[index], signature = renderSignature(project, text);
+        const text = chunks[index], signature = `balabolka-cmd-v1:${renderSignature(project, text)}`;
         const id = bookChunkId(project.id, chapter.id, index);
         const old = await getBookChunk(id);
         let label = old?.engineLabel;
