@@ -313,8 +313,6 @@ export function SettingsView() {
           <div className="grid gap-4 md:grid-cols-2">
             {([
               ['gpuAcceleration', 'GPU acceleration', 'Mark GPU offload as allowed for tuned presets.'],
-              ['fallbackMode', 'Force fallback TTS (non-AI)', 'Always use the built-in formant engine — even if AI voices are available.'],
-              ['autoFallback', 'Auto-fallback on AI failure', 'If the AI engine errors mid-job, continue with the built-in engine automatically.'],
               ['autoTune', 'Auto-tune from PC specs', 'Recompute all engine settings whenever the hardware profile changes.'],
               ['notifications', 'Job notifications', 'Show a toast when background jobs finish.'],
               ['longSessionGuard', 'Long-session guard', 'Extra-conservative chunking for 10+ hour conversion sessions.'],
