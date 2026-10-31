@@ -13,7 +13,7 @@ import { bookChunkId, bookChunkInfo, deleteBook, listBooks, saveBook, type BookC
 import { chapterAudio, downloadBookBlob, exportBookPackage } from '@/lib/engines/book-export';
 import { renderBook, type BookRenderProgress } from '@/lib/engines/book-render';
 import { allVoiceProfiles } from '@/lib/engines/formant';
-import { probeOsTtsBridge } from '@/lib/engines/os-tts-bridge';
+import { probeOsTtsBridge, getBridgeUrl, setBridgeUrl, setBridgeAccessToken } from '@/lib/engines/os-tts-bridge';
 import { useAppStore } from '@/lib/stores/app-store';
 import type { OsTtsVoiceDef } from '@/lib/types';
 
@@ -37,6 +37,9 @@ export function BookDeskView() {
   const [error, setError] = useState('');
   const [info, setInfo] = useState<BookChunkInfo[]>([]);
   const [voices, setVoices] = useState<OsTtsVoiceDef[]>([]);
+  const [hostedUrl, setHostedUrl] = useState('');
+  const [hostedToken, setHostedToken] = useState('');
+  const [hostedStatus, setHostedStatus] = useState('');
   const [audioUrl, setAudioUrl] = useState('');
   const [dictFrom, setDictFrom] = useState(''), [dictTo, setDictTo] = useState('');
   const [storage, setStorage] = useState('');
@@ -69,7 +72,7 @@ export function BookDeskView() {
     const map = new Map(info.map(c => [c.id, c]));
     return project?.chapters.map(c => {
       const plan = splitBookText(c.text, project.chunkChars).filter(t => t.trim());
-      const valid = plan.map((t, i) => map.get(bookChunkId(project.id, c.id, i))).filter((x, i) => x?.signature === renderSignature(project, plan[i]));
+      const valid = plan.map((t, i) => map.get(bookChunkId(project.id, c.id, i))).filter((x, i) => x?.signature === `balabolka-cmd-v1:${renderSignature(project, plan[i])}`);
       return { done: valid.length, total: plan.length, seconds: valid.reduce((n, c) => n + (c ? c.frames / c.sampleRate : 0), 0) };
     }) ?? [];
   }, [project, info]);
@@ -159,6 +162,32 @@ export function BookDeskView() {
           <Button disabled={busy} variant="outline" onClick={() => backupRef.current?.click()}>Restore project JSON</Button>
           <Button disabled={busy} variant="outline" onClick={() => void action(checkStorage)}>Check local storage</Button>
         </div>
+        <details className="rounded-md border p-3 text-xs">
+          <summary className="cursor-pointer font-medium">Hosted Balabolka connection (no visitor installation)</summary>
+          <p className="mt-2 text-muted-foreground">
+            On GitHub Pages, audio comes from a separately hosted Windows speech server. Your browser does not run Balabolka.
+          </p>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <div><Label htmlFor="book-hosted-url">Hosted HTTPS speech URL</Label>
+              <Input id="book-hosted-url" className="h-8" value={hostedUrl} onChange={e => setHostedUrl(e.target.value)}
+                placeholder={getBridgeUrl() || 'https://tts.example.com'} />
+            </div>
+            <div><Label htmlFor="book-hosted-token">Access token (if required)</Label>
+              <Input id="book-hosted-token" type="password" autoComplete="off" className="h-8" value={hostedToken}
+                onChange={e => setHostedToken(e.target.value)} placeholder="Not stored after this tab closes" />
+            </div>
+          </div>
+          <Button size="sm" variant="outline" disabled={busy} className="mt-2" onClick={() => void action(async () => {
+            if (hostedUrl.trim()) setBridgeUrl(hostedUrl);
+            if (hostedToken.trim()) { setBridgeAccessToken(hostedToken); setHostedToken(''); }
+            const probe = await probeOsTtsBridge(true);
+            if (!probe.status.ok) throw new Error(probe.status.error || 'Hosted Balabolka server unreachable.');
+            setVoices(probe.voices);
+            setHostedStatus(`${probe.voices.length} remote voice(s) available.`);
+          })}>Connect hosted Balabolka</Button>
+          {hostedStatus && <p className="mt-1" role="status">{hostedStatus}</p>}
+          <p className="mt-1 text-muted-foreground">The server operator must configure the backend; this form does not create a server.</p>
+        </details>
         <input ref={fileRef} className="hidden" type="file" multiple aria-label="Import book files" onChange={e => { const files = Array.from(e.target.files ?? []); e.target.value = ''; void importFiles(files); }} />
         <input ref={backupRef} className="hidden" type="file" accept=".json" aria-label="Restore book project" onChange={e => {
           const file = e.target.files?.[0]; e.target.value = '';
@@ -166,7 +195,7 @@ export function BookDeskView() {
             if (file.size > 64 * 1024 * 1024) throw new Error('Project backup is too large (64 MB maximum)');
             if (dirty && !window.confirm('Discard unsaved edits and restore this project?')) return;
             const p = validateBookProject(JSON.parse(await file.text())); await persist(p); setChapterIndex(0); setAudioUrl('');
-            setNotice('Project restored. Audio is regenerated locally; backups contain text and settings.');
+            setNotice('Project restored. Audio can be regenerated through the configured hosted Balabolka service; backups contain text and settings.');
           });
         }} />
         <label className="flex gap-2 text-sm"><input type="checkbox" disabled={busy} checked={allowOcr} onChange={e => setAllowOcr(e.target.checked)} />Use local English OCR for images and scanned PDFs (slower)</label>
@@ -205,7 +234,7 @@ export function BookDeskView() {
           <div className="space-y-2"><Label htmlFor="desk-language">Language code</Label><Input id="desk-language" value={project.language} onChange={e => edit({ language: e.target.value })} placeholder="en, hi-IN, ja-JP…" /></div>
           {project.engine === 'builtin' ? <div className="space-y-2"><Label htmlFor="desk-profile">Character profile (maps to Balabolka)</Label><select id="desk-profile" className={selectStyle} value={project.profileId} onChange={e => edit({ profileId: e.target.value })}>{allVoiceProfiles().map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
             : <div className="space-y-2"><Label htmlFor="desk-voice">Installed voice</Label><select id="desk-voice" className={selectStyle} value={project.voiceId} onChange={e => edit({ voiceId: e.target.value })}><option value="">Auto-select by language</option>{voices.map(v => <option key={v.id} value={v.id}>{v.name} · {v.lang} · {v.engine}</option>)}</select>
-              <Button size="sm" variant="outline" onClick={() => void action(async () => { const probe = await probeOsTtsBridge(true); setVoices(probe.voices); if (!probe.status.ok || !probe.voices.length) throw new Error('No Balabolka/Piper voices found. Start npm run os-tts; install Balabolka CMD on Windows or Piper on macOS/Linux.'); setNotice(`${probe.voices.length} installed voices available.`); })}>Refresh installed voices</Button>
+              <Button size="sm" variant="outline" onClick={() => void action(async () => { const probe = await probeOsTtsBridge(true); setVoices(probe.voices); if (!probe.status.ok || !probe.voices.length) throw new Error('No Balabolka/Piper voices found. Configure the hosted speech connection above, or start a bridge for local development.'); setNotice(`${probe.voices.length} installed voices available.`); })}>Refresh installed voices</Button>
               <p className="text-xs text-muted-foreground">Start the companion with <code>npm run os-tts</code>. Voice availability depends on installed language packs. No automatic fallback changes your selected engine.</p>
             </div>}
           {(['rate', 'pitch', 'volume'] as const).map(k => <div className="space-y-2" key={k}><Label htmlFor={`desk-${k}`}>{k[0].toUpperCase() + k.slice(1)}: {project[k].toFixed(2)}</Label><input className="w-full" id={`desk-${k}`} type="range" min={k === 'volume' ? 0 : 0.5} max={k === 'volume' ? 1 : 2} step="0.05" value={project[k]} onChange={e => edit({ [k]: Number(e.target.value) })} /></div>)}
