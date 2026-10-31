@@ -7,5 +7,5 @@ export default defineConfig({
     { name: 'firefox', use: { browserName: 'firefox' } },
     { name: 'webkit', use: { browserName: 'webkit' } },
   ],
-  webServer: { command: 'node scripts/serve-out.mjs', url: 'http://127.0.0.1:3000', reuseExistingServer: !process.env.CI },
+  webServer: { command: 'node tests/start-e2e.mjs', url: 'http://127.0.0.1:3000', reuseExistingServer: !process.env.CI },
 });
