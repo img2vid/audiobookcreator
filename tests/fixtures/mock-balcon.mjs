@@ -29,4 +29,4 @@ for (let i = 0; i < frames; i++) {
   const signal = Math.sin(2 * Math.PI * 220 * i / hz);
   wav.writeInt16LE(Math.round(signal * envelope * 4000), 44 + i * 2);
 }
-setTimeout(() => fs.writeFileSync(file, wav), text.includes('slow') ? 10000 : 20);
+setTimeout(() => fs.writeFileSync(file, wav), text.includes('slow') ? 10000 : 120);
