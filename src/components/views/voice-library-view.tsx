@@ -382,7 +382,7 @@ export function VoiceLibraryView() {
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
-                    {voices.length} installed Balabolka SAPI voice{voices.length === 1 ? '' : 's'} available for preview and export.
+                    {voices.length} installed Balabolka SAPI voice{voices.length === 1 ? '' : 's'} for preview and export · {neural.length} labelled natural/neural.
                   </div>
                   {Array.from(filteredVoices.entries()).map(([lang, list]) => (
                     <div key={lang}>
