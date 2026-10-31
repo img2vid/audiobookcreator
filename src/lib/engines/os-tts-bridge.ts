@@ -114,7 +114,8 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
   const url = getBridgeUrl();
   if (!url) return { status: { url: '', ok: false, error: 'No hosted speech server configured. Ask the site operator to deploy the Windows Balabolka backend and set NEXT_PUBLIC_SPEECH_BRIDGE_URL.' }, voices: [] };
   if (!force && cached && Date.now() - cached.at < CACHE_MS) return cached.result;
-  if (inFlight) return inFlight;
+  if (inFlight && !force) return inFlight;
+  let pending: Promise<ProbeResult> | null = null;
   inFlight = (async (): Promise<ProbeResult> => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 45_000);
@@ -157,9 +158,10 @@ export async function probeOsTtsBridge(force = false): Promise<ProbeResult> {
       return result;
     } finally {
       clearTimeout(timer);
-      inFlight = null;
+      if (inFlight === pending) inFlight = null;
     }
   })();
+  pending = inFlight;
   return inFlight;
 }
 
