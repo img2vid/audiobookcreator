@@ -270,12 +270,28 @@ export async function synthesizeViaBridge(req: OsSynthRequest, timeoutMs = 120_0
   signal?.throwIfAborted();
   signal?.addEventListener('abort', abort, { once: true });
   try {
-    const res = await fetch(`${url}/synthesize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeHeaders() },
-      body: JSON.stringify(req),
-      signal: ctrl.signal,
-    });
+    // Hosted servers may be serving another user; retry 429 without ever
+    // switching to the robotic engine. Keep the same overall timeout/signal.
+    let res: Response | undefined;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      ctrl.signal.throwIfAborted();
+      res = await fetch(`${url}/synthesize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...bridgeHeaders() },
+        body: JSON.stringify(req),
+        signal: ctrl.signal,
+      });
+      if (res.status !== 429 || attempt === 7) break;
+      const seconds = Number(res.headers.get('Retry-After'));
+      const delay = Number.isFinite(seconds) && seconds > 0 ? Math.min(5000, seconds * 1000) : 1000;
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => { clearTimeout(timerId); reject(ctrl.signal.reason ?? new Error('Speech synthesis cancelled')); };
+        const timerId = setTimeout(() => { ctrl.signal.removeEventListener('abort', onAbort); resolve(); }, delay);
+        ctrl.signal.addEventListener('abort', onAbort, { once: true });
+        if (ctrl.signal.aborted) onAbort();
+      });
+    }
+    if (!res) throw new Error('Hosted speech server did not respond.');
     if (!res.ok) {
       let msg = `bridge /synthesize → HTTP ${res.status}`;
       try {
