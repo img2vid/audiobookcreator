@@ -252,6 +252,11 @@ async function balabolkaExecutable() {
   return await findBinary('balcon.exe') || await findBinary('balcon');
 }
 
+// Integration tests may point BALABOLKA_CMD to Node and supply a JS CLI
+// fixture script separately; ordinary users should leave this unset.
+function balabolkaPrefixArgs() {
+  return process.env.BALABOLKA_CMD_SCRIPT ? [process.env.BALABOLKA_CMD_SCRIPT] : [];
+}
 const DEFAULT_BALABOLKA_VOICE = 'Default Windows voice';
 ENGINES.balabolka = {
   label: 'Balabolka CMD (Windows SAPI)',
@@ -267,7 +272,7 @@ ENGINES.balabolka = {
     const exe = await balabolkaExecutable();
     if (!exe) return [];
     try {
-      const { stdout } = await run(exe, ['-l'], { timeoutMs: 20000, cwd: path.dirname(exe) });
+      const { stdout } = await run(exe, [...balabolkaPrefixArgs(), '-l'], { timeoutMs: 20000, cwd: path.dirname(exe) });
       const names = [...new Set(stdout.split(/\r?\n/)
         .map(line => line.replace(/^\s*\d+[.)]\s*/, '').trim())
         .filter(name => name && !/^(?:available voices|voices|voice name|balabolka|usage:|error:|sapi [45]:?)/i.test(name)))];
@@ -293,7 +298,7 @@ ENGINES.balabolka = {
     const outFile = uniqueTemp('wav');
     // UTF-8 with BOM is reliable across Windows locale/codepage settings.
     fs.writeFileSync(textFile, '\ufeff' + sanitizeText(text), 'utf8');
-    const args = ['-f', textFile, '-w', outFile, '--encoding', 'utf8',
+    const args = [...balabolkaPrefixArgs(), '-f', textFile, '-w', outFile, '--encoding', 'utf8',
       '-s', String(sapiRate(rate)), '-p', String(sapiRate(pitch)),
       '-v', String(sapiVolume(volume)), '-e', '120', '-a', '200',
       '-bt', '16', '-ch', '1'];
