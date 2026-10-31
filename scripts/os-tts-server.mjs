@@ -991,6 +991,10 @@ const server = http.createServer(async (req, res) => {
       const voiceRec = wanted
         ? enginesCache.voices.find((v) => (!body.engine || v.engine === body.engine) && (v.id === body.voice || String(v.name).toLowerCase() === wanted.toLowerCase()))
         : undefined;
+      if (wanted && !voiceRec) {
+        sendJson(res, 400, { error: 'The requested voice is not installed or is not available to Balabolka/Piper. Refresh the voice list.' });
+        return;
+      }
       const engineId = voiceRec && ENGINES[voiceRec.engine] && enginesCache.available[voiceRec.engine]
         ? voiceRec.engine
         : pickEngine(body.engine);
