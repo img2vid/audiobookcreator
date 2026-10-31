@@ -819,13 +819,14 @@ let refreshInFlight = null;
 
 // Merge order for the combined voice list: better-sounding engines win
 // duplicate names (Piper neural > WinRT natural > legacy SAPI > …).
-const MERGE_PRIORITY = ['piper', 'balabolka'];
+const MERGE_PRIORITY = ['balabolka', 'piper'];
 
 // WHY is an engine false? Static per-engine reasons for the optional /
 // platform-specific engines, overridden by live scan diagnostics (engineNotes)
 // when we know more. Shown on the console + /ping + /voices so "false" is
 // never mysterious.
 function engineReason(id) {
+  if (engineNotes[id]) return engineNotes[id];
   if (id === 'balabolka') return 'Balabolka CMD (balcon.exe) not found; install it on Windows and set BALABOLKA_CMD';
   if (id === 'piper') return 'not installed on this machine — optional neural voices; place piper.exe + *.onnx models in C:\\Program Files\\piper or %USERPROFILE%\\piper (see https://github.com/rhasspy/piper)';
   if (engineNotes[id]) return engineNotes[id];
@@ -858,7 +859,7 @@ async function refreshEngines(force = false) {
       if (!eng || !available[id]) continue;
       try {
         for (const v of await eng.list()) {
-          const key = String(v.name || '').toLowerCase();
+          const key = `${id}:${String(v.name || '').toLowerCase()}`;
           if (key && seen.has(key)) continue;
           if (key) seen.add(key);
           voices.push(v);
