@@ -50,7 +50,7 @@ export function getBridgeUrl(): string {
       if (url) return url;
     }
     if (HOSTED_BRIDGE_URL) return normalizeBridgeUrl(HOSTED_BRIDGE_URL);
-    if (window.location.hostname.endsWith('.github.io')) return '';
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)) return '';
     return 'http://127.0.0.1:8477';
   } catch {
     return normalizeBridgeUrl(HOSTED_BRIDGE_URL) || '';
