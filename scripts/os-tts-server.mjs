@@ -29,6 +29,7 @@
 // ============================================================
 
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -36,13 +37,30 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = 6;
+const VERSION = 7;
 const PORT = Number(process.env.PORT) || 8477;
 const HOST = '127.0.0.1'; // Never expose local speech/files to the LAN.
 const requestScope = new AsyncLocalStorage();
 const children = new Set();
 let activeSynthesis = false;
-const extraOrigins = new Set((process.env.BRIDGE_ALLOWED_ORIGINS || '').split(',').filter(Boolean));
+const extraOrigins = new Set((process.env.BRIDGE_ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean));
+// When exposing the loopback service through an HTTPS reverse proxy, the
+// proxy normally forwards the public Host header unchanged. Explicitly allow
+// only hosts listed here; never accept arbitrary Host headers.
+const remoteHosts = new Set((process.env.BRIDGE_ALLOWED_HOSTS || '').split(',')
+  .map(s => s.trim().toLowerCase()).filter(Boolean));
+const bridgeAccessToken = (process.env.BRIDGE_ACCESS_TOKEN || '').trim();
+if (remoteHosts.size && bridgeAccessToken.length < 24) {
+  throw new Error('Hosted bridge requires BRIDGE_ACCESS_TOKEN (at least 24 characters). Never put this token in GitHub Pages code or repository variables.');
+}
+const authenticatedRemote = bridgeAccessToken.length > 0;
+function authorized(req) {
+  if (!authenticatedRemote) return true;
+  const supplied = (req.headers.authorization || '').replace(/^Bearer /i, '');
+  const expected = Buffer.from(bridgeAccessToken, 'utf8');
+  const actual = Buffer.from(supplied, 'utf8');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
 const MAX_TEXT_CHARS = 25_000;
 const ENGINE_TIMEOUT_MS = Number(process.env.ENGINE_TIMEOUT_MS) || 60_000;
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'os-tts-bridge-'));
@@ -120,6 +138,11 @@ function uniqueTemp(ext) {
 // used to report "false" on Windows even when it was installed: the old
 // availability check was Linux-only.)
 const WIN_BIN_CANDIDATES = {
+  balcon: [
+    'C:\\Program Files\\Balabolka\\balcon.exe',
+    'C:\\Program Files (x86)\\Balabolka\\balcon.exe',
+    path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Balabolka', 'balcon.exe'),
+  ],
   'espeak-ng': [
     'C:\\Program Files\\eSpeak NG\\espeak-ng.exe',
     'C:\\Program Files (x86)\\eSpeak NG\\espeak-ng.exe',
@@ -232,6 +255,85 @@ function escapeXml(s) {
 
 const PLATFORM = process.platform;
 const ENGINES = {}; // id → { available, list(), synth() }
+
+
+// ---------- Balabolka CMD / balcon.exe (Windows SAPI voice output) ----------
+// The only non-Piper renderer exposed by this bridge. Balabolka is a separate
+// Windows program; it reads the Windows SAPI voices installed by the user.
+// BALABOLKA_CMD overrides auto-detection (also permits a CLI test double).
+async function balabolkaExecutable() {
+  if (process.env.BALABOLKA_CMD) {
+    const cmd = path.resolve(process.env.BALABOLKA_CMD);
+    return fs.existsSync(cmd) ? cmd : null;
+  }
+  if (PLATFORM !== 'win32') return null;
+  return await findBinary('balcon.exe') || await findBinary('balcon');
+}
+
+// Integration tests may point BALABOLKA_CMD to Node and supply a JS CLI
+// fixture script separately; ordinary users should leave this unset.
+function balabolkaPrefixArgs() {
+  return process.env.BALABOLKA_CMD_SCRIPT ? [process.env.BALABOLKA_CMD_SCRIPT] : [];
+}
+const DEFAULT_BALABOLKA_VOICE = 'Default Windows voice';
+ENGINES.balabolka = {
+  label: 'Balabolka CMD (Windows SAPI)',
+  async available() {
+    const exe = await balabolkaExecutable();
+    if (!exe) engineNotes.balabolka = PLATFORM !== 'win32' && !process.env.BALABOLKA_CMD
+      ? 'Balabolka CMD requires Windows (use Piper on macOS/Linux)'
+      : 'balcon.exe not found. Install the Balabolka command-line utility and set BALABOLKA_CMD to its full path.';
+    else delete engineNotes.balabolka;
+    return !!exe;
+  },
+  async list() {
+    const exe = await balabolkaExecutable();
+    if (!exe) return [];
+    try {
+      const { stdout } = await run(exe, [...balabolkaPrefixArgs(), '-l'], { timeoutMs: 20000, cwd: path.dirname(exe) });
+      const names = [...new Set(stdout.split(/\r?\n/)
+        .map(line => line.replace(/^\s*\d+[.)]\s*/, '').trim())
+        .filter(name => name && !/^(?:available voices|voices|voice name|balabolka|usage:|error:|sapi [45]:?)/i.test(name)))];
+      // Some console versions return no list despite a usable Windows
+      // default voice. Omit -n when synthesizing that default voice.
+      if (!names.length) names.push(DEFAULT_BALABOLKA_VOICE);
+      return names.map(name => ({
+        id: `balabolka:${name}`, engine: 'balabolka', name,
+        lang: 'und', neural: /natural|neural/i.test(name),
+        quality: /natural|neural/i.test(name) ? 5 : 3,
+        description: 'Installed Windows SAPI voice via Balabolka CMD',
+      }));
+    } catch (err) {
+      log('Balabolka voice enumeration failed:', err.message);
+      engineNotes.balabolka = `balcon.exe -l failed: ${err.message}`;
+      return [];
+    }
+  },
+  async synth({ text, voice, rate, pitch, volume }) {
+    const exe = await balabolkaExecutable();
+    if (!exe) throw new Error('Balabolka CMD (balcon.exe) is unavailable; set BALABOLKA_CMD to its absolute path');
+    const textFile = uniqueTemp('txt');
+    const outFile = uniqueTemp('wav');
+    // UTF-8 with BOM is reliable across Windows locale/codepage settings.
+    fs.writeFileSync(textFile, '\ufeff' + sanitizeText(text), 'utf8');
+    const args = [...balabolkaPrefixArgs(), '-f', textFile, '-w', outFile, '--encoding', 'utf8',
+      '-s', String(sapiRate(rate)), '-p', String(sapiRate(pitch)),
+      '-v', String(sapiVolume(volume)), '-e', '120', '-a', '200',
+      '-bt', '16', '-ch', '1'];
+    if (voice && voice !== DEFAULT_BALABOLKA_VOICE) args.push('-n', voice);
+    try {
+      await run(exe, args, { cwd: path.dirname(exe) });
+      if (!fs.existsSync(outFile) || fs.statSync(outFile).size < 44)
+        throw new Error('balcon.exe returned without generating a WAV file');
+      return outFile;
+    } catch (err) {
+      try { fs.unlinkSync(outFile); } catch {}
+      throw err;
+    } finally {
+      try { fs.unlinkSync(textFile); } catch {}
+    }
+  },
+};
 
 // ---------- Windows SAPI 5 (System.Speech) ----------
 const SAPI_PS_LIST = `
@@ -735,13 +837,15 @@ let refreshInFlight = null;
 
 // Merge order for the combined voice list: better-sounding engines win
 // duplicate names (Piper neural > WinRT natural > legacy SAPI > …).
-const MERGE_PRIORITY = ['piper', 'winrt', 'sapi', 'say', 'espeak-ng', 'espeak'];
+const MERGE_PRIORITY = ['balabolka', 'piper'];
 
 // WHY is an engine false? Static per-engine reasons for the optional /
 // platform-specific engines, overridden by live scan diagnostics (engineNotes)
 // when we know more. Shown on the console + /ping + /voices so "false" is
 // never mysterious.
 function engineReason(id) {
+  if (engineNotes[id]) return engineNotes[id];
+  if (id === 'balabolka') return 'Balabolka CMD (balcon.exe) not found; install it on Windows and set BALABOLKA_CMD';
   if (id === 'piper') return 'not installed on this machine — optional neural voices; place piper.exe + *.onnx models in C:\\Program Files\\piper or %USERPROFILE%\\piper (see https://github.com/rhasspy/piper)';
   if (engineNotes[id]) return engineNotes[id];
   if (id === 'say' && PLATFORM !== 'darwin') return 'macOS-only engine (Apple Speech `say`) — not applicable on this OS';
@@ -760,8 +864,8 @@ async function refreshEngines(force = false) {
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = (async () => {
     const available = {};
-    for (const [id, eng] of Object.entries(ENGINES)) {
-      try { available[id] = await eng.available(); } catch { available[id] = false; }
+    for (const id of MERGE_PRIORITY) {
+      try { available[id] = await ENGINES[id].available(); } catch { available[id] = false; }
     }
     // Merge the voice lists with a fixed priority so a voice that two engines
     // both expose (e.g. "Microsoft David" under SAPI and WinRT) is listed
@@ -773,7 +877,7 @@ async function refreshEngines(force = false) {
       if (!eng || !available[id]) continue;
       try {
         for (const v of await eng.list()) {
-          const key = String(v.name || '').toLowerCase();
+          const key = `${id}:${String(v.name || '').toLowerCase()}`;
           if (key && seen.has(key)) continue;
           if (key) seen.add(key);
           voices.push(v);
@@ -783,7 +887,7 @@ async function refreshEngines(force = false) {
       }
     }
     const engineInfo = {};
-    for (const id of Object.keys(ENGINES)) {
+    for (const id of MERGE_PRIORITY) {
       engineInfo[id] = available[id]
         ? { available: true, ...(engineNotes[id] ? { warning: engineNotes[id] } : {}) }
         : { available: false, reason: engineReason(id) };
@@ -800,14 +904,9 @@ async function refreshEngines(force = false) {
 
 function pickEngine(requested) {
   const { available } = enginesCache;
-  if (requested && ENGINES[requested] && available[requested]) return requested;
-  // platform-native preference order (most realistic first; the OneCore
-  // natural voices beat legacy SAPI David/Zira by a wide margin)
-  const order = PLATFORM === 'win32' ? ['winrt', 'sapi', 'piper']
-    : PLATFORM === 'darwin' ? ['say', 'piper']
-      : ['espeak-ng', 'espeak', 'piper'];
-  for (const id of order) if (available[id]) return id;
-  return null;
+  // Never substitute a missing Balabolka/Piper voice with a different engine.
+  if (requested) return (requested === 'piper' || requested === 'balabolka') && available[requested] ? requested : null;
+  return available.balabolka ? 'balabolka' : null;
 }
 
 // ---------------------------------------------------------------- HTTP layer
@@ -831,7 +930,7 @@ const CORS = {
   // Set per response to a validated caller, never a wildcard.
   'Vary': 'Origin',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Expose-Headers': 'X-OS-TTS-Engine',
   // Chrome "Private Network Access": pages served over HTTPS (e.g. GitHub Pages)
   // or from the LAN may talk to this loopback bridge ONLY if the preflight
@@ -843,7 +942,11 @@ const CORS = {
 
 const server = http.createServer(async (req, res) => {
   const host = req.headers.host ?? '';
-  if (!/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host)) { res.writeHead(403).end('Invalid loopback Host'); return; }
+  let hostName = '';
+  try { hostName = new URL('http://' + host).hostname.toLowerCase().replace(/^\[|\]$/g, ''); } catch {}
+  if (!['localhost', '127.0.0.1', '::1'].includes(hostName) && !remoteHosts.has(hostName)) {
+    res.writeHead(403).end('Host is not allowed'); return;
+  }
   const origin = req.headers.origin;
   let localOrigin = false;
   try { const u = new URL(origin); localOrigin = ['http:', 'https:'].includes(u.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname); } catch {}
@@ -855,6 +958,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, CORS);
     res.end();
+    return;
+  }
+  if (!authorized(req)) {
+    sendJson(res, 401, { error: 'Hosted Balabolka server requires a valid access token.' });
     return;
   }
 
@@ -897,6 +1004,7 @@ const server = http.createServer(async (req, res) => {
         if (body[key] != null && (!Number.isFinite(body[key]) || body[key] < (key === 'rate' ? 0.1 : 0) || body[key] > (key === 'rate' ? 4 : key === 'pitch' ? 2 : 1))) { sendJson(res, 400, { error: `Invalid ${key}` }); return; }
       }
       if (body.engine && !ENGINES[body.engine]) { sendJson(res, 400, { error: 'Unknown speech engine' }); return; }
+      if (body.engine && !['piper', 'balabolka'].includes(body.engine)) { sendJson(res, 400, { error: 'Select Balabolka CMD or Piper. Other speech engines are disabled.' }); return; }
       // Reject invalid requests without awaiting expensive native voice discovery.
       // On Windows, the first PowerShell/WinRT scan may take tens of seconds.
       const text = sanitizeText(body.text ?? '');
@@ -910,16 +1018,20 @@ const server = http.createServer(async (req, res) => {
       // bundles (which hardcode the old engine ids) fully compatible when a
       // new bridge adds engines such as 'winrt'.
       const wanted = typeof body.voice === 'string'
-        ? body.voice.replace(/^(sapi|winrt|say|espeak-ng|espeak|piper):/, '').trim()
+        ? body.voice.replace(/^(balabolka|sapi|winrt|say|espeak-ng|espeak|piper):/, '').trim()
         : '';
       const voiceRec = wanted
         ? enginesCache.voices.find((v) => (!body.engine || v.engine === body.engine) && (v.id === body.voice || String(v.name).toLowerCase() === wanted.toLowerCase()))
         : undefined;
+      if (wanted && !voiceRec) {
+        sendJson(res, 400, { error: 'The requested voice is not installed or is not available to Balabolka/Piper. Refresh the voice list.' });
+        return;
+      }
       const engineId = voiceRec && ENGINES[voiceRec.engine] && enginesCache.available[voiceRec.engine]
         ? voiceRec.engine
         : pickEngine(body.engine);
       if (!engineId) {
-        sendJson(res, 503, { error: 'no OS speech engine available on this machine' });
+        sendJson(res, 503, { error: body.engine === 'piper' ? 'Piper is unavailable or has no voice model' : 'Balabolka CMD is unavailable. Install balcon.exe on Windows and configure BALABOLKA_CMD, or explicitly select Piper.' });
         return;
       }
       // Piper's model path is engine-owned state: voice records carry it, but
@@ -984,6 +1096,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, async () => {
+  if (remoteHosts.size) log(`Hosted mode enabled for host(s) ${[...remoteHosts].join(', ')} via an HTTPS reverse proxy; origin allowlist has ${extraOrigins.size} entries.`);
   log(`OS Speech Bridge listening on http://${HOST}:${PORT}`);
   log(`Platform: ${PLATFORM} · temp dir: ${TMP_DIR}`);
   const status = await refreshEngines(true);
@@ -997,7 +1110,7 @@ server.listen(PORT, HOST, async () => {
   }
   log(`Voices: ${status.voices.length}`);
   if (!status.voices.length) {
-    log('No voices found — start the app anyway; TTS Studio will show exactly which engine is missing.');
+    log('No Balabolka/Piper voices found — install Balabolka CMD on Windows or configure Piper.');
     if (PLATFORM === 'linux' && !status.available['espeak-ng']) {
       log('Hint: install espeak-ng (sudo apt install espeak-ng) for Linux voices, or Piper for neural quality.');
     }

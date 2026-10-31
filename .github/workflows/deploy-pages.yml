@@ -10,6 +10,9 @@
 #     they are fetched during the build instead of being committed to git.
 #     Use "none" to deploy without the language model (AutoBook then uses its
 #     built-in rule-based resolver).
+#   SPEECH_BRIDGE_URL = https://tts.example.com
+#     Public HTTPS URL for a separately hosted Windows Balabolka service.
+#     Never configure a secret access token in this variable.
 
 name: Deploy to GitHub Pages
 
@@ -65,6 +68,9 @@ jobs:
         run: node scripts/fetch-assets.mjs model ${{ vars.AUTOBOOK_MODEL || '360m' }}
 
       - name: Build static site
+        env:
+          # Public endpoint only; never put a speech server bearer token here.
+          NEXT_PUBLIC_SPEECH_BRIDGE_URL: ${{ vars.SPEECH_BRIDGE_URL }}
         run: npm run build
 
       - uses: actions/upload-pages-artifact@v5

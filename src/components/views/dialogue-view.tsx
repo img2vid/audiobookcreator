@@ -5,7 +5,7 @@
  *
  * Write a cast of speakers, assign each a voice profile (built-in or custom), then author
  * a screenplay-style script ("Name: line"). Every line renders with its
- * speaker's voice through the local formant/markup engine and the takes are
+ * speaker's voice through the Balabolka CMD bridge and the takes are
  * stitched — with configurable inter-line pauses — into a single audio file.
  * Everything runs on-device.
  */
@@ -14,7 +14,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '@/lib/stores/app-store';
 import { enqueueJob } from '@/lib/queue';
 import { allVoiceProfiles, estimateSpeechDurationSec, isCustomProfile } from '@/lib/engines/formant';
-import { synthesizeWithMarkup, parseVoiceMarkup, estimateMarkupDurationSec } from '@/lib/engines/markup';
+import { parseVoiceMarkup, estimateMarkupDurationSec } from '@/lib/engines/markup';
+import { synthesizeWithSelectedEngine } from '@/lib/engines/dispatch';
+import { TTS_MODELS } from '@/lib/data/tts-models';
 import { applyLexicon, loadLexicon, type LexiconRule } from '@/lib/engines/lexicon';
 import { saveDialogueDraft, loadDialogueDraft, clearDialogueDraft, dialogueDraftHasContent, type DialogueDraft } from '@/lib/engines/dialogue-db';
 import { buildSrt } from '@/lib/engines/video-render';
@@ -303,8 +305,9 @@ export function DialogueView() {
     const member = cast[l.speaker] ?? { voiceProfile: 'aura-neutral', rate: 1, pitch: 1 };
     setPreviewingId(l.id);
     try {
-      const buf = await synthesizeWithMarkup(prepare(l.text), {
-        profileId: member.voiceProfile, rate: member.rate, pitch: member.pitch, volume: 1, quality: tuned.synthesisQuality,
+      const { buffer: buf } = await synthesizeWithSelectedEngine(prepare(l.text), {
+        model: TTS_MODELS[0], profileId: member.voiceProfile, rate: member.rate,
+        pitch: member.pitch, volume: 1, quality: tuned.synthesisQuality,
       });
       const ctx = previewCtxRef.current ?? new AudioContext();
       previewCtxRef.current = ctx;
@@ -355,8 +358,9 @@ export function DialogueView() {
             prepared = rep.text;
             rep.applied.forEach((w) => lexApplied.push(w));
           }
-          const buf = await synthesizeWithMarkup(prepared, {
-            profileId: member.voiceProfile, rate: member.rate, pitch: member.pitch, volume: 1, quality: tuned.synthesisQuality,
+          const { buffer: buf } = await synthesizeWithSelectedEngine(prepared, {
+            model: TTS_MODELS[0], profileId: member.voiceProfile, rate: member.rate,
+            pitch: member.pitch, volume: 1, quality: tuned.synthesisQuality,
           });
           lineTimings.push({ speaker: l.speaker, text: l.text, startSec: cursorSec, endSec: cursorSec + buf.duration });
           cursorSec += buf.duration + (i < speakable.length - 1 && gapMs > 0 ? gapMs / 1000 : 0);

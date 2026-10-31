@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '@/lib/stores/app-store';
-import { groupVoicesByLang, listNeuralVoices, listSystemVoices, isSpeechSynthesisAvailable } from '@/lib/engines/speech';
+import { groupVoicesByLang } from '@/lib/engines/speech';
 import {
   VOICE_PROFILES,
   allVoiceProfiles,
@@ -86,13 +86,17 @@ export function VoiceLibraryView() {
 
   useEffect(() => {
     const load = () => {
-      void listSystemVoices().then((v) => {
-        setVoices(v);
-        setEngine({ systemVoices: v.length });
+      void probeOsTtsBridge(true).then(({ voices: bridgeVoices }) => {
+        const localVoices = bridgeVoices.filter(v => v.engine === 'balabolka')
+          .map((v) => ({
+            name: v.name, lang: v.lang, voiceURI: v.id, localService: true, default: false,
+          } as SpeechSynthesisVoice));
+        setVoices(localVoices);
+        setEngine({ systemVoices: localVoices.length });
       });
     };
     load();
-    const t = setInterval(load, 4000);
+    const t = setInterval(load, 20_000);
     return () => clearInterval(t);
   }, []);
 
@@ -128,42 +132,47 @@ export function VoiceLibraryView() {
   }, [customProfiles, query]);
 
   const previewSystemVoice = (v: SpeechSynthesisVoice) => {
-    if (!isSpeechSynthesisAvailable()) return;
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance('Hello from Openmukti Audiobook Creator. This voice runs entirely on your machine.');
-    u.voice = v;
-    u.rate = 1;
-    window.speechSynthesis.speak(u);
     setPreviewing(v.voiceURI);
-    u.onend = () => setPreviewing(null);
+    void (async () => {
+      try {
+        const probe = await probeOsTtsBridge();
+        if (!probe.status.ok) throw new Error('Start the Balabolka bridge with npm run os-tts.');
+        const selected = probe.voices.find((voice) => voice.engine === 'balabolka' && voice.name.toLowerCase() === v.name.toLowerCase())
+          ?? probe.voices.find((voice) => voice.engine === 'balabolka');
+        if (!selected) throw new Error('No Balabolka CMD voice available.');
+        const result = await synthesizeViaBridge({
+          engine: 'balabolka', voice: selected.name,
+          text: 'Hello from Openmukti Audiobook Creator. This voice runs entirely on your machine.',
+        });
+        const ctx = new AudioContext();
+        const src = ctx.createBufferSource();
+        src.buffer = result.buffer;
+        src.connect(ctx.destination);
+        src.onended = () => { setPreviewing(null); void ctx.close(); };
+        src.start();
+      } catch (err) {
+        setPreviewing(null);
+        toast({ title: 'Balabolka preview failed', description: String(err), variant: 'destructive' });
+      }
+    })();
   };
 
-  /** Audition through the ESTABLISHED OS engine when the bridge is running —
-   *  the exact voice this profile maps to in renders — falling back to the
-   *  built-in formant synth only when no OS engine is reachable. */
+  /** Audition profiles through Balabolka CMD; never substitute a formant voice. */
   const auditionBestEngine = async (
     text: string,
     profileId: string,
     gender: VoiceProfileDef['gender'] | undefined,
-    formantRender: () => Promise<AudioBuffer>,
+    _formantRender: () => Promise<AudioBuffer>,
   ): Promise<{ buffer: AudioBuffer; viaBridge: boolean; label?: string }> => {
-    try {
-      const probe = await probeOsTtsBridge();
-      if (probe.status.ok && probe.voices.length > 0) {
-        const voice = pickOsVoiceForProfile(probe.voices, profileId, gender, 'en');
-        if (voice) {
-          const res = await synthesizeViaBridge({
-            engine: voice.engine as OsTtsEngineId,
-            voice: voice.name,
-            text,
-          });
-          return { buffer: res.buffer, viaBridge: true, label: `${voice.engine} · ${voice.name}` };
-        }
-      }
-    } catch {
-      // bridge unreachable → formant fallback below
-    }
-    return { buffer: await formantRender(), viaBridge: false };
+    const probe = await probeOsTtsBridge();
+    if (!probe.status.ok) throw new Error('Start the local Balabolka speech bridge with npm run os-tts.');
+    const bridgeVoices = probe.voices.filter((v) => v.engine === 'balabolka');
+    const voice = pickOsVoiceForProfile(bridgeVoices, profileId, gender, 'en');
+    if (!voice) throw new Error('No Balabolka CMD voice found. Install balcon.exe and configure BALABOLKA_CMD.');
+    const res = await synthesizeViaBridge({
+      engine: 'balabolka', voice: voice.name, text,
+    });
+    return { buffer: res.buffer, viaBridge: true, label: `Balabolka CMD · ${voice.name}` };
   };
 
   const previewProfile = async (profileId: string, name: string) => {
@@ -175,12 +184,7 @@ export function VoiceLibraryView() {
           profileId, rate: 1, pitch: 1, volume: 1, quality: 'balanced',
         }),
       );
-      if (!audition.viaBridge) {
-        toast({
-          title: 'Previewed with the built-in synth',
-          description: 'Start the OS bridge (npm run os-tts) to audition this profile with the real OS voice it maps to.',
-        });
-      }
+      
       const ctx = new AudioContext();
       const src = ctx.createBufferSource();
       src.buffer = audition.buffer;
@@ -282,12 +286,7 @@ export function VoiceLibraryView() {
           rate: 1, pitch: 1, volume: 1, quality: 'fast',
         }),
       );
-      if (!audition.viaBridge) {
-        toast({
-          title: 'Previewed with the built-in synth',
-          description: 'Start the OS bridge (npm run os-tts) to audition this profile with the real OS voice it maps to.',
-        });
-      }
+      
       const ctx = new AudioContext();
       const src = ctx.createBufferSource();
       src.buffer = audition.buffer;
@@ -336,7 +335,7 @@ export function VoiceLibraryView() {
         <Tabs defaultValue="models">
           <TabsList>
             <TabsTrigger value="models"><Brain className="mr-1.5 h-4 w-4" />Models ({filteredModels.length})</TabsTrigger>
-            <TabsTrigger value="system"><Mic2 className="mr-1.5 h-4 w-4" />System voices ({voices.length})</TabsTrigger>
+            <TabsTrigger value="system"><Mic2 className="mr-1.5 h-4 w-4" />Balabolka voices ({voices.length})</TabsTrigger>
             <TabsTrigger value="profiles"><Bot className="mr-1.5 h-4 w-4" />Built-in profiles ({VOICE_PROFILES.length})</TabsTrigger>
           </TabsList>
 
@@ -374,20 +373,16 @@ export function VoiceLibraryView() {
           </TabsContent>
 
           <TabsContent value="system">
-            {!isSpeechSynthesisAvailable() ? (
+            {voices.length === 0 ? (
               <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-                This browser does not expose the Speech Synthesis API. The built-in formant engine remains fully available.
-              </div>
-            ) : voices.length === 0 ? (
-              <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-                Scanning for system voices… if none appear, your OS may have no TTS voices installed.
+                No Balabolka voices detected. Start npm run os-tts and install Balabolka CMD (balcon.exe) on Windows.
               </div>
             ) : (
               <ScrollArea className="max-h-[30rem] pr-3">
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
-                    {neural.length} neural-quality voice{neural.length === 1 ? '' : 's'} detected — these give the best AI results.
+                    {voices.length} installed Balabolka SAPI voice{voices.length === 1 ? '' : 's'} for preview and export · {neural.length} labelled natural/neural.
                   </div>
                   {Array.from(filteredVoices.entries()).map(([lang, list]) => (
                     <div key={lang}>
@@ -400,7 +395,7 @@ export function VoiceLibraryView() {
                                 {v.name}
                                 {/neural|natural|premium|enhanced|siri/i.test(v.name) && <Badge variant="secondary" className="h-4 px-1 text-[9px] text-emerald-600">neural</Badge>}
                               </div>
-                              <div className="text-[11px] text-muted-foreground">{v.lang} · {v.localService ? 'local (offline-capable)' : 'network voice'}</div>
+                              <div className="text-[11px] text-muted-foreground">{v.lang} · local Windows SAPI voice via Balabolka CMD</div>
                             </div>
                             <Button size="icon" variant="ghost" className="h-8 w-8" aria-label={`Preview ${v.name}`} onClick={() => previewSystemVoice(v)}>
                               {previewing === v.voiceURI ? <Volume2 className="h-4 w-4 animate-pulse text-violet-600" /> : <Play className="h-3.5 w-3.5" />}

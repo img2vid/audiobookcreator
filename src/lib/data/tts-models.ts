@@ -2,33 +2,30 @@ import type { TTSModelDef } from '@/lib/types';
 
 /**
  * Local TTS model catalog.
- *  - "os-bridge" models route renders to the ESTABLISHED speech engine that
- *    ships with your OS (Windows SAPI 5, macOS Apple Speech, Linux espeak-ng)
- *    or to Piper neural voices — via the local bridge server (`npm run os-tts`).
- *  - "system-neural" / "system-classic" models map onto the browser's Web
- *    Speech voices (which wrap the same OS runtimes) for live preview, and to
- *    the bridge for file renders when it is running.
+ *  - All non-Piper models render through Balabolka CMD (balcon.exe) via the
+ *    local bridge. Piper is used only when explicitly selected.
+ *  - Legacy system-neural/system-classic presets select Balabolka voices.
+ *    Previews and file exports use the same command-line backend.
  *
  * The former "AuraVoice Formant Core/Studio", "VoxMecha", "Storybook Voice
  * Pack", "WhisperKit Profiles", "DeepContext Pro" and "EmotiveX" catalog
  * entries were retired: they were all presets of the built-in parametric
  * formant synthesizer (and the two "Pro" packs were simulated), not real
- * speech engines. The formant synth remains ONLY as an emergency fallback
- * when no OS engine is reachable, and as the persona definition format that
- * maps onto real OS voices.
+ * speech engines. The formant profiles remain as persona definitions, but
+ * their built-in synthesizer is not used when Balabolka or Piper is absent.
  * Everything runs locally.
  */
 export const TTS_MODELS: TTSModelDef[] = [
   {
     id: 'os-native-speech',
-    name: 'OS Speech Engine (native)',
+    name: 'Balabolka CMD (Windows)',
     family: 'OS Bridge',
     lang: 'multi',
     sizeMB: 0,
     quality: 5,
     engine: 'os-bridge',
     bundled: true,
-    description: 'Renders through the established speech engine installed with your OS — Windows SAPI 5, macOS Apple Speech (say) or Linux espeak-ng — via the local bridge server (npm run os-tts). Real OS voices in previews AND file exports.',
+    description: 'Uses Balabolka CMD (balcon.exe) and installed Windows SAPI voices for all non-Piper speech. Previews and exports use the same local engine.',
     tags: ['bundled', 'os-level', 'renders-to-file', 'multi-language'],
     gpuRecommended: false,
   },
@@ -54,7 +51,7 @@ export const TTS_MODELS: TTSModelDef[] = [
     quality: 5,
     engine: 'system-neural',
     bundled: true,
-    description: 'Automatically uses the highest-quality neural voices installed on this machine (Edge/Windows Natural, macOS Siri voices, etc.). Previews speak in-browser; file renders go through the OS bridge when it is running.',
+    description: 'Legacy profile: prefers natural-sounding voices available to Balabolka CMD; both preview and export use balcon.exe.',
     tags: ['bundled', 'best-quality', 'multi-language'],
     gpuRecommended: false,
   },
@@ -67,7 +64,7 @@ export const TTS_MODELS: TTSModelDef[] = [
     quality: 2,
     engine: 'system-classic',
     bundled: true,
-    description: 'Classic SAPI-style system voices (Microsoft David/Zira, Apple Fred…). Selection is honored: classic local voices are picked instead of neural ones. Very low latency, extremely stable for batch jobs.',
+    description: 'Classic Windows SAPI voices via Balabolka CMD. No GPU required.',
     tags: ['bundled', 'low-latency', 'classic'],
     gpuRecommended: false,
   },

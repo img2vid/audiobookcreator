@@ -34,20 +34,8 @@ test('static serving: base paths, HEAD, ranges, hostile host, malformed URLs, mi
 test('bridge: loopback policy, validation, CPU admission control and disconnect cleanup', { timeout: 20000 }, async () => {
   const dir = temp();
   // This stub tests process/HTTP plumbing; it is explicitly NOT a voice-quality test.
-  if (process.platform !== 'win32') {
-    const stub = `#!/usr/bin/env node
-import fs from 'node:fs';
-const a=process.argv.slice(2);
-if(a.includes('--voices')) { console.log('Pty Language Age/Gender VoiceName File'); console.log(' 5 en M Fixture fixture'); process.exit(0); }
-let text=''; process.stdin.setEncoding('utf8'); process.stdin.on('data',d=>text+=d); process.stdin.on('end',()=>{
-const b=Buffer.alloc(444); b.write('RIFF'); b.writeUInt32LE(436,4); b.write('WAVEfmt ',8); b.writeUInt32LE(16,16); b.writeUInt16LE(1,20); b.writeUInt16LE(1,22); b.writeUInt32LE(22050,24); b.writeUInt32LE(44100,28); b.writeUInt16LE(2,32); b.writeUInt16LE(16,34); b.write('data',36); b.writeUInt32LE(400,40);
-setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?10000:20);
-});
-`;
-    fs.writeFileSync(path.join(dir, 'espeak-ng'), stub, { mode: 0o755 });
-  }
   const reserve = net.createServer(); const address = await listen(reserve); const port = new URL(address).port; await new Promise(resolve => reserve.close(resolve));
-  const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: port, PATH: dir + path.delimiter + process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: port, BALABOLKA_CMD: process.execPath, BALABOLKA_CMD_SCRIPT: path.resolve('tests/fixtures/mock-balcon.mjs'), PATH: dir + path.delimiter + process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = ''; child.stdout.on('data', d => { logs += d; }); child.stderr.on('data', d => { logs += d; });
   const url = `http://127.0.0.1:${port}`;
   const post = (body, options = {}) => fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body), ...options });
@@ -60,18 +48,28 @@ setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?1
     assert.equal((await post('{')).status, 400);
     assert.equal((await post({ text: 'test', volume: 4 })).status, 400);
     assert.equal((await post({ text: 'test', engine: 'fake-engine' })).status, 400);
+    assert.equal((await post({ text: 'test', engine: 'espeak-ng' })).status, 400);
     // Invalid input must fail promptly even while Windows voice discovery is running.
     assert.equal((await post({ text: 'a'.repeat(25001) }, { signal: AbortSignal.timeout(5000) })).status, 413);
-    if (process.platform !== 'win32') {
-      await fetch(`${url}/voices`);
-      const audio = await post({ engine: 'espeak-ng', voice: 'Fixture', text: 'hello' }); assert.equal(audio.status, 200); assert.equal((await audio.arrayBuffer()).byteLength, 444);
+    {
+      const voiceResponse = await fetch(`${url}/voices`);
+      const voices = (await voiceResponse.json()).voices;
+      assert.ok(voices.some(v => v.id === 'balabolka:Microsoft Zira Desktop'));
+      assert.ok(voices.every(v => v.engine === 'balabolka' || v.engine === 'piper'));
+      const audio = await post({ engine: 'balabolka', voice: 'Microsoft Zira Desktop', text: 'hello 👋' });
+      assert.equal(audio.status, 200);
+      assert.equal(audio.headers.get('x-os-tts-engine'), 'balabolka');
+      assert.equal((await audio.arrayBuffer()).byteLength, 444);
+      const autodetect = await post({ text: 'hello' });
+      assert.equal(autodetect.headers.get('x-os-tts-engine'), 'balabolka');
+      await autodetect.arrayBuffer();
       const ctrl = new AbortController();
-      const hanging = fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'espeak-ng', text: 'slow' }), signal: ctrl.signal }).catch(() => null);
+      const hanging = fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'balabolka', text: 'slow' }), signal: ctrl.signal }).catch(() => null);
       await new Promise(r => setTimeout(r, 150));
-      assert.equal((await post({ engine: 'espeak-ng', text: 'hello' })).status, 429);
+      assert.equal((await post({ engine: 'balabolka', text: 'hello' })).status, 429);
       ctrl.abort(); await hanging;
       let retried;
-      for (let i = 0; i < 50; i++) { await new Promise(r => setTimeout(r, 50)); retried = await post({ engine: 'espeak-ng', text: 'hello' }); if (retried.status !== 429) break; }
+      for (let i = 0; i < 50; i++) { await new Promise(r => setTimeout(r, 50)); retried = await post({ engine: 'balabolka', text: 'hello' }); if (retried.status !== 429) break; }
       assert.equal(retried.status, 200);
     }
   } finally {
@@ -82,6 +80,73 @@ setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?1
       await exited;
     }
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('hosted Balabolka bridge: explicit Host, Origin, HTTPS-proxy bearer auth and WAV export', { timeout: 30000 }, async () => {
+  const reserve = net.createServer();
+  const address = await listen(reserve);
+  const port = new URL(address).port;
+  await new Promise(resolve => reserve.close(resolve));
+  const token = 'test-token-with-at-least-24-characters-xyz';
+  const siteOrigin = 'https://img2vid.github.io';
+  const remoteHost = 'tts.example.test';
+  const env = {
+    ...process.env, PORT: port,
+    BRIDGE_ALLOWED_HOSTS: remoteHost,
+    BRIDGE_ALLOWED_ORIGINS: siteOrigin,
+    BRIDGE_ACCESS_TOKEN: token,
+    BALABOLKA_CMD: process.execPath,
+    BALABOLKA_CMD_SCRIPT: path.resolve('tests/fixtures/mock-balcon.mjs'),
+  };
+  const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], {
+    cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let logs = '';
+  child.stdout.on('data', d => { logs += d; });
+  child.stderr.on('data', d => { logs += d; });
+  const url = 'http://127.0.0.1:' + port;
+  const headers = { Host: remoteHost, Origin: siteOrigin };
+  try {
+    let ready = false;
+    for (let i = 0; i < 120; i++) {
+      try {
+        const response = await fetch(url + '/ping', { headers: { ...headers, Authorization: 'Bearer ' + token } });
+        if (response.ok) { ready = true; break; }
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(ready, logs);
+    assert.equal((await fetch(url + '/ping', { headers })).status, 401);
+    assert.equal((await fetch(url + '/ping', { headers: { ...headers, Authorization: 'Bearer invalid' } })).status, 401);
+    assert.equal((await fetch(url + '/ping', { headers: { ...headers, Host: 'not-allowed.example', Authorization: 'Bearer ' + token } })).status, 403);
+    assert.equal((await fetch(url + '/ping', { headers: { ...headers, Origin: 'https://evil.example', Authorization: 'Bearer ' + token } })).status, 403);
+    const preflight = await fetch(url + '/synthesize', {
+      method: 'OPTIONS',
+      headers: { ...headers, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization, content-type' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), siteOrigin);
+    assert.match(preflight.headers.get('access-control-allow-headers') || '', /authorization/i);
+    const voices = await fetch(url + '/voices', { headers: { ...headers, Authorization: 'Bearer ' + token } });
+    assert.equal(voices.status, 200);
+    assert.ok((await voices.json()).voices.some(voice => voice.engine === 'balabolka'));
+    const audio = await fetch(url + '/synthesize', {
+      method: 'POST',
+      headers: { ...headers, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ engine: 'balabolka', text: 'remote audio', voice: 'Microsoft Zira Desktop' }),
+    });
+    assert.equal(audio.status, 200);
+    assert.equal(audio.headers.get('x-os-tts-engine'), 'balabolka');
+    const wave = Buffer.from(await audio.arrayBuffer());
+    assert.equal(wave.toString('ascii', 0, 4), 'RIFF');
+    assert.ok(wave.byteLength > 10000);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit');
+      child.kill();
+      await exited;
+    }
   }
 });
 
