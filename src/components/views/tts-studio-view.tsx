@@ -6,7 +6,7 @@ import { useMounted } from '@/hooks/use-mounted';
 import { enqueueJob } from '@/lib/queue';
 import { SpeechQueue, listSystemVoices, isSpeechSynthesisAvailable } from '@/lib/engines/speech';
 import {
-  probeOsTtsBridge, invalidateBridgeCache, getBridgeUrl, setBridgeUrl, OS_ENGINE_CAPS,
+  probeOsTtsBridge, invalidateBridgeCache, getBridgeUrl, setBridgeUrl, setBridgeAccessToken, hasBridgeAccessToken, OS_ENGINE_CAPS,
 } from '@/lib/engines/os-tts-bridge';
 import { synthesizeWithSelectedEngine, voiceClassForModel } from '@/lib/engines/dispatch';
 import {
@@ -57,8 +57,8 @@ import {
   RotateCcw, Save, Scissors, Server, Sparkles, Square, Trash2, TriangleAlert, Upload, Volume2, Wand2, Waves, X, Zap, ZoomIn,
 } from 'lucide-react';
 
-const SAMPLE_TEXT = `Welcome to Openmukti Audiobook Creator — a fully local text-to-speech workstation.
-Everything you hear is generated on this machine. No uploads, no cloud, no waiting rooms.
+const SAMPLE_TEXT = `Welcome to Openmukti Audiobook Creator — a text-to-speech workstation.
+Speech can be generated remotely on a hosted Balabolka server, or using a configured Piper backend.
 
 [pause 400]Try the voice markup: [em]this phrase is emphasized[/em], [whisper]this one is a whisper[/whisper], and [spell]tts[/spell] is spelled out.
 [rate 1.15]You can even change speed mid-sentence like this[/rate], then return to normal.`;
@@ -165,6 +165,8 @@ export function TtsStudioView() {
   const [bridgeVoices, setBridgeVoices] = useState<OsTtsVoiceDef[]>([]);
   const [bridgeProbing, setBridgeProbing] = useState(false);
   const [bridgeUrlDraft, setBridgeUrlDraft] = useState('');
+  const [bridgeTokenDraft, setBridgeTokenDraft] = useState('');
+  const [bridgeHasToken, setBridgeHasToken] = useState(false);
   const [osVoiceId, setOsVoiceId] = useState('');
 
   const speechQueue = useRef<SpeechQueue | null>(null);
@@ -210,6 +212,7 @@ export function TtsStudioView() {
     setBridgeProbing(true);
     try { setOsVoiceId(window.localStorage.getItem('os-tts-voice') ?? ''); } catch { /* ignore */ }
     setBridgeUrlDraft('');
+    setBridgeHasToken(hasBridgeAccessToken());
     void probeOsTtsBridge().then((res) => {
       if (cancelled) return;
       setBridgeStatus(res.status);
@@ -220,16 +223,26 @@ export function TtsStudioView() {
   }, []);
 
   const retryBridge = useCallback(async () => {
-    if (bridgeUrlDraft.trim()) setBridgeUrl(bridgeUrlDraft.trim());
-    invalidateBridgeCache();
-    setBridgeProbing(true);
-    const res = await probeOsTtsBridge(true);
-    setBridgeStatus(res.status);
-    setBridgeVoices(res.voices);
-    setBridgeProbing(false);
-    if (res.status.ok) toast({ title: 'OS speech bridge detected', description: `${res.voices.length} voices from your operating system's speech engines.` });
-    else toast({ title: 'Bridge not reachable', description: `Start it with: npm run os-tts (${res.status.url})${res.status.error ? ` — ${res.status.error}` : ''}`, variant: 'destructive' });
-  }, [bridgeUrlDraft, toast]);
+    try {
+      if (bridgeUrlDraft.trim()) setBridgeUrl(bridgeUrlDraft.trim());
+      if (bridgeTokenDraft.trim()) {
+        setBridgeAccessToken(bridgeTokenDraft);
+        setBridgeHasToken(true);
+        setBridgeTokenDraft('');
+      }
+      invalidateBridgeCache();
+      setBridgeProbing(true);
+      const res = await probeOsTtsBridge(true);
+      setBridgeStatus(res.status);
+      setBridgeVoices(res.voices);
+      if (res.status.ok && res.voices.length) toast({ title: 'Hosted speech backend connected', description: `${res.voices.length} Balabolka/Piper voices available.` });
+      else toast({ title: 'Speech backend not ready', description: res.status.error || 'No voices detected. Configure a Windows Balabolka server or Piper backend.', variant: 'destructive' });
+    } catch (err) {
+      toast({ title: 'Invalid speech server configuration', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setBridgeProbing(false);
+    }
+  }, [bridgeUrlDraft, bridgeTokenDraft, toast]);
 
   const updateOsVoiceId = useCallback((id: string) => {
     setOsVoiceId(id);
@@ -1571,55 +1584,43 @@ export function TtsStudioView() {
             </div>
 
             {(isBridgeModel || model.engine.startsWith('system')) && (
-              <div className={cn('rounded-md border p-2.5 text-[11px] leading-relaxed', bridgeUp ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-amber-500/30 bg-amber-500/10')}>
+              <div className={cn('rounded-md border p-3 text-xs', bridgeUp ? 'border-emerald-500/30' : 'border-amber-500/30')}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="flex items-center gap-1.5 font-medium">
-                    <Server className="h-3.5 w-3.5" />
-                    OS speech bridge {bridgeProbing ? '· probing…' : bridgeUp
-                      ? `· online (${bridgeVoices.length} OS voices)`
-                      : '· not running'}
+                    <Server className="h-4 w-4" />
+                    Balabolka / Piper hosted speech {bridgeProbing ? '· connecting…' : bridgeUp ? '· connected' : '· not connected'}
                   </span>
-                  <Button size="sm" variant="ghost" className="h-6 gap-1 px-2 text-[11px]" onClick={() => void retryBridge()} disabled={bridgeProbing}>
-                    <RefreshCw className={cn('h-3 w-3', bridgeProbing && 'animate-spin')} />Retry
+                  <Button size="sm" variant="outline" className="h-7 gap-1" onClick={() => void retryBridge()} disabled={bridgeProbing}>
+                    <RefreshCw className={cn('h-3.5 w-3.5', bridgeProbing && 'animate-spin')} />
+                    Connect / Retry
                   </Button>
                 </div>
-                {bridgeUp ? (
-                  <>
-                    <p className="mt-1 text-muted-foreground">
-                      Detected: {Object.entries(bridgeStatus?.engines ?? {}).filter(([, ok]) => ok).map(([id]) => OS_ENGINE_CAPS[id as keyof typeof OS_ENGINE_CAPS]?.label ?? id).join(' · ') || 'system engines'} — renders use the real OS voice.
-                    </p>
-                    {(() => {
-                      // v4 bridges ship a reason for every unavailable engine — show the
-                      // most actionable ones (live scan diagnostics first, e.g. why the
-                      // modern Windows voices are missing) instead of a bare "false".
-                      const reasons = Object.entries(bridgeStatus?.engineInfo ?? {})
-                        .filter(([, info]) => info && !info.available && info.reason)
-                        .map(([id, info]) => `${id}: ${info!.reason}`)
-                        .slice(0, 2);
-                      if (!reasons.length) return null;
-                      return (
-                        <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground/80">
-                          Not detected — {reasons.join(' · ')}
-                        </p>
-                      );
-                    })()}
-                  </>
-                ) : (
-                  <>
-                    <p className="mt-1 text-muted-foreground">
-                      Renders with OS voices need the local bridge server (the browser alone cannot capture system speech to files). Start it next to the app:
-                    </p>
-                    <div className="mt-1.5 flex items-center gap-1.5">
-                      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">npm run os-tts</code>
-                      <Input
-                        value={bridgeUrlDraft}
-                        onChange={(e) => setBridgeUrlDraft(e.target.value)}
-                        placeholder={getBridgeUrl()}
-                        className="h-6 max-w-44 bg-background font-mono text-[10px]"
-                        aria-label="Bridge server URL"
-                      />
-                    </div>
-                  </>
+                <p className="mt-2 text-muted-foreground">
+                  For GitHub Pages, speech runs on a separately hosted Windows server over HTTPS.
+                  GitHub Pages itself cannot run balcon.exe. The website does not need a visitor-side installation.
+                </p>
+                <div className="mt-2 space-y-1">
+                  <Label htmlFor="hosted-bridge-url" className="text-xs">Hosted speech API URL</Label>
+                  <Input id="hosted-bridge-url" value={bridgeUrlDraft} onChange={(e) => setBridgeUrlDraft(e.target.value)}
+                    placeholder={getBridgeUrl() || 'https://tts.example.com'} aria-label="Bridge server URL" className="h-8 font-mono text-xs" />
+                </div>
+                <div className="mt-2 space-y-1">
+                  <Label htmlFor="hosted-bridge-token" className="text-xs">Access token (if required)</Label>
+                  <Input id="hosted-bridge-token" type="password" autoComplete="off" value={bridgeTokenDraft}
+                    onChange={(e) => setBridgeTokenDraft(e.target.value)}
+                    placeholder={bridgeHasToken ? 'Token active for this tab' : 'Access token from the server operator'}
+                    aria-label="Hosted speech access token" className="h-8 text-xs" />
+                  <p className="text-[10px] text-muted-foreground">
+                    Tokens stay in browser memory for this tab; do not place a server token in public GitHub Pages code.
+                  </p>
+                </div>
+                {bridgeUp && (
+                  <p className="mt-2 text-muted-foreground">
+                    {bridgeVoices.length} voices available · {bridgeVoices.map(v => v.engine).filter((v, i, a) => a.indexOf(v) === i).join(' / ')}
+                  </p>
+                )}
+                {!bridgeUp && bridgeStatus?.error && (
+                  <p className="mt-1 break-words text-amber-700 dark:text-amber-300">{bridgeStatus.error}</p>
                 )}
               </div>
             )}
