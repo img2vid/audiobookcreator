@@ -83,6 +83,73 @@ test('bridge: loopback policy, validation, CPU admission control and disconnect 
   }
 });
 
+test('hosted Balabolka bridge: explicit Host, Origin, HTTPS-proxy bearer auth and WAV export', { timeout: 30000 }, async () => {
+  const reserve = net.createServer();
+  const address = await listen(reserve);
+  const port = new URL(address).port;
+  await new Promise(resolve => reserve.close(resolve));
+  const token = 'test-token-with-at-least-24-characters-xyz';
+  const siteOrigin = 'https://img2vid.github.io';
+  const remoteHost = 'tts.example.test';
+  const env = {
+    ...process.env, PORT: port,
+    BRIDGE_ALLOWED_HOSTS: remoteHost,
+    BRIDGE_ALLOWED_ORIGINS: siteOrigin,
+    BRIDGE_ACCESS_TOKEN: token,
+    BALABOLKA_CMD: process.execPath,
+    BALABOLKA_CMD_SCRIPT: path.resolve('tests/fixtures/mock-balcon.mjs'),
+  };
+  const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], {
+    cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let logs = '';
+  child.stdout.on('data', d => { logs += d; });
+  child.stderr.on('data', d => { logs += d; });
+  const url = 'http://127.0.0.1:' + port;
+  const headers = { Host: remoteHost, Origin: siteOrigin };
+  try {
+    let ready = false;
+    for (let i = 0; i < 120; i++) {
+      try {
+        const response = await fetch(url + '/ping', { headers: { ...headers, Authorization: 'Bearer ' + token } });
+        if (response.ok) { ready = true; break; }
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(ready, logs);
+    assert.equal((await fetch(url + '/ping', { headers })).status, 401);
+    assert.equal((await fetch(url + '/ping', { headers: { ...headers, Authorization: 'Bearer invalid' } })).status, 401);
+    assert.equal((await fetch(url + '/ping', { headers: { ...headers, Host: 'not-allowed.example', Authorization: 'Bearer ' + token } })).status, 403);
+    assert.equal((await fetch(url + '/ping', { headers: { ...headers, Origin: 'https://evil.example', Authorization: 'Bearer ' + token } })).status, 403);
+    const preflight = await fetch(url + '/synthesize', {
+      method: 'OPTIONS',
+      headers: { ...headers, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization, content-type' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), siteOrigin);
+    assert.match(preflight.headers.get('access-control-allow-headers') || '', /authorization/i);
+    const voices = await fetch(url + '/voices', { headers: { ...headers, Authorization: 'Bearer ' + token } });
+    assert.equal(voices.status, 200);
+    assert.ok((await voices.json()).voices.some(voice => voice.engine === 'balabolka'));
+    const audio = await fetch(url + '/synthesize', {
+      method: 'POST',
+      headers: { ...headers, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ engine: 'balabolka', text: 'remote audio', voice: 'Microsoft Zira Desktop' }),
+    });
+    assert.equal(audio.status, 200);
+    assert.equal(audio.headers.get('x-os-tts-engine'), 'balabolka');
+    const wave = Buffer.from(await audio.arrayBuffer());
+    assert.equal(wave.toString('ascii', 0, 4), 'RIFF');
+    assert.ok(wave.byteLength > 10000);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit');
+      child.kill();
+      await exited;
+    }
+  }
+});
+
 test('FFmpeg exporter uses actual sample duration and rejects escaping inputs', () => {
   const dir = temp(), p = path.join(dir, 'part.wav');
   const b = Buffer.alloc(44144); b.write('RIFF'); b.write('WAVEfmt ', 8); b.writeUInt16LE(1,20); b.writeUInt16LE(1,22); b.writeUInt32LE(22050,24); b.writeUInt16LE(16,34); b.write('data',36); b.writeUInt32LE(44100,40); fs.writeFileSync(p,b);
