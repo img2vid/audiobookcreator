@@ -1024,8 +1024,8 @@ export function TtsStudioView() {
           `Synthesizing via Balabolka CMD (Piper when explicitly selected): ${model.name}…`,
         );
         // 1. synthesize via the ENGINE DISPATCHER — routes to the engine the user
-        //    selected: OS bridge (SAPI / say / espeak-ng / Piper) for OS-level
-        //    models, the bundled formant engine otherwise. No more silent swap.
+        //    selected: Balabolka CMD for all non-Piper voices, Piper when
+        //    explicitly selected. Missing engines now cause clear errors.
         if (prepared.substitutions > 0) {
           api.log(`Lexicon: ${prepared.substitutions} substitution${prepared.substitutions === 1 ? '' : 's'} (${prepared.applied.slice(0, 5).join(', ')}${prepared.applied.length > 5 ? '…' : ''})`);
         }
@@ -1299,7 +1299,7 @@ export function TtsStudioView() {
                 <PopoverContent className="w-80 text-xs" align="start">
                   <div className="space-y-2">
                     <div className="font-medium">Voice markup cheat sheet</div>
-                    <p className="text-muted-foreground">Inline tags honored by the built-in engine in previews and file renders. AI voices read the stripped text.</p>
+                    <p className="text-muted-foreground">Inline voice tags are honored by Balabolka CMD (or Piper) in previews and file renders.</p>
                     <div className="space-y-1.5 font-mono text-[11px]">
                       <div><span className="rounded bg-muted px-1">[pause 500]</span> <span className="font-sans text-muted-foreground">500 ms of silence (or 1.5s)</span></div>
                       <div><span className="rounded bg-muted px-1">[break]</span> <span className="font-sans text-muted-foreground">short breath pause</span></div>
@@ -1682,7 +1682,7 @@ export function TtsStudioView() {
                 <p className="text-[11px] text-muted-foreground">{selectedProfile?.description}</p>
                 {!selectedProfile && (
                   <p className="text-[11px] text-amber-600">
-                    That profile no longer exists — synthesis falls back to the default built-in voice until you pick another.
+                    That profile no longer exists. Choose a working profile before rendering.
                   </p>
                 )}
               </div>
