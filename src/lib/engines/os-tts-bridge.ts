@@ -65,6 +65,7 @@ export interface OsEngineCaps {
 }
 
 export const OS_ENGINE_CAPS: Record<OsTtsEngineId, OsEngineCaps> = {
+  balabolka: { label: 'Balabolka CMD (Windows SAPI)', rate: true, pitch: true, volume: true },
   sapi: { label: 'Windows SAPI 5', rate: true, pitch: true, volume: true },
   winrt: { label: 'Windows Natural Voices', rate: true, pitch: true, volume: true },
   say: { label: 'macOS Apple Speech', rate: true, pitch: false, volume: false },
@@ -223,7 +224,7 @@ export function wavToAudioBuffer(buffer: ArrayBuffer): AudioBuffer {
 // ---------- synthesis ----------
 
 export interface OsSynthRequest {
-  /** Engine id ('sapi' | 'winrt' | 'say' | 'espeak-ng' | 'espeak' | 'piper'). Omit → server picks the platform default. */
+  /** Engine id ('balabolka' | 'piper' (all other engines disabled)). Omit → server picks the platform default. */
   engine?: OsTtsEngineId;
   /** Engine-specific voice name (server strips the `engine:` prefix). */
   voice?: string;
