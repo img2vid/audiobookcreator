@@ -34,19 +34,8 @@ test('static serving: base paths, HEAD, ranges, hostile host, malformed URLs, mi
 test('bridge: loopback policy, validation, CPU admission control and disconnect cleanup', { timeout: 20000 }, async () => {
   const dir = temp();
   // This stub tests process/HTTP plumbing; it is explicitly NOT a voice-quality test.
-  if (process.platform !== 'win32') {
-    const stub = `#!/usr/bin/env node
-import fs from 'node:fs';
-const a=process.argv.slice(2);
-if(a.includes('-l')) { console.log('Microsoft Zira Desktop'); console.log('Microsoft David Desktop'); process.exit(0); }
-const text = fs.readFileSync(a[a.indexOf('-f')+1], 'utf8');
-const b=Buffer.alloc(444); b.write('RIFF'); b.writeUInt32LE(436,4); b.write('WAVEfmt ',8); b.writeUInt32LE(16,16); b.writeUInt16LE(1,20); b.writeUInt16LE(1,22); b.writeUInt32LE(22050,24); b.writeUInt32LE(44100,28); b.writeUInt16LE(2,32); b.writeUInt16LE(16,34); b.write('data',36); b.writeUInt32LE(400,40);
-setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?10000:20);
-`;
-    fs.writeFileSync(path.join(dir, 'balcon-stub.mjs'), stub, { mode: 0o755 });
-  }
   const reserve = net.createServer(); const address = await listen(reserve); const port = new URL(address).port; await new Promise(resolve => reserve.close(resolve));
-  const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: port, BALABOLKA_CMD: process.platform === 'win32' ? '' : path.join(dir, 'balcon-stub.mjs'), PATH: dir + path.delimiter + process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['scripts/os-tts-server.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: port, BALABOLKA_CMD: process.execPath, BALABOLKA_CMD_SCRIPT: path.resolve('tests/fixtures/mock-balcon.mjs'), PATH: dir + path.delimiter + process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = ''; child.stdout.on('data', d => { logs += d; }); child.stderr.on('data', d => { logs += d; });
   const url = `http://127.0.0.1:${port}`;
   const post = (body, options = {}) => fetch(`${url}/synthesize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body), ...options });
@@ -62,7 +51,7 @@ setTimeout(()=>fs.writeFileSync(a[a.indexOf('-w')+1],b), text.includes('slow')?1
     assert.equal((await post({ text: 'test', engine: 'espeak-ng' })).status, 400);
     // Invalid input must fail promptly even while Windows voice discovery is running.
     assert.equal((await post({ text: 'a'.repeat(25001) }, { signal: AbortSignal.timeout(5000) })).status, 413);
-    if (process.platform !== 'win32') {
+    {
       const voiceResponse = await fetch(`${url}/voices`);
       const voices = (await voiceResponse.json()).voices;
       assert.ok(voices.some(v => v.id === 'balabolka:Microsoft Zira Desktop'));
