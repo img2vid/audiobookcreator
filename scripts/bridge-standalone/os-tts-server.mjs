@@ -29,6 +29,7 @@
 // ============================================================
 
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -42,7 +43,24 @@ const HOST = '127.0.0.1'; // Never expose local speech/files to the LAN.
 const requestScope = new AsyncLocalStorage();
 const children = new Set();
 let activeSynthesis = false;
-const extraOrigins = new Set((process.env.BRIDGE_ALLOWED_ORIGINS || '').split(',').filter(Boolean));
+const extraOrigins = new Set((process.env.BRIDGE_ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean));
+// When exposing the loopback service through an HTTPS reverse proxy, the
+// proxy normally forwards the public Host header unchanged. Explicitly allow
+// only hosts listed here; never accept arbitrary Host headers.
+const remoteHosts = new Set((process.env.BRIDGE_ALLOWED_HOSTS || '').split(',')
+  .map(s => s.trim().toLowerCase()).filter(Boolean));
+const bridgeAccessToken = (process.env.BRIDGE_ACCESS_TOKEN || '').trim();
+if (remoteHosts.size && bridgeAccessToken.length < 24) {
+  throw new Error('Hosted bridge requires BRIDGE_ACCESS_TOKEN (at least 24 characters). Never put this token in GitHub Pages code or repository variables.');
+}
+const authenticatedRemote = bridgeAccessToken.length > 0;
+function authorized(req) {
+  if (!authenticatedRemote) return true;
+  const supplied = (req.headers.authorization || '').replace(/^Bearer /i, '');
+  const expected = Buffer.from(bridgeAccessToken, 'utf8');
+  const actual = Buffer.from(supplied, 'utf8');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
 const MAX_TEXT_CHARS = 25_000;
 const ENGINE_TIMEOUT_MS = Number(process.env.ENGINE_TIMEOUT_MS) || 60_000;
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'os-tts-bridge-'));
@@ -912,7 +930,7 @@ const CORS = {
   // Set per response to a validated caller, never a wildcard.
   'Vary': 'Origin',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Expose-Headers': 'X-OS-TTS-Engine',
   // Chrome "Private Network Access": pages served over HTTPS (e.g. GitHub Pages)
   // or from the LAN may talk to this loopback bridge ONLY if the preflight
@@ -924,7 +942,11 @@ const CORS = {
 
 const server = http.createServer(async (req, res) => {
   const host = req.headers.host ?? '';
-  if (!/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host)) { res.writeHead(403).end('Invalid loopback Host'); return; }
+  let hostName = '';
+  try { hostName = new URL('http://' + host).hostname.toLowerCase().replace(/^\[|\]$/g, ''); } catch {}
+  if (!['localhost', '127.0.0.1', '::1'].includes(hostName) && !remoteHosts.has(hostName)) {
+    res.writeHead(403).end('Host is not allowed'); return;
+  }
   const origin = req.headers.origin;
   let localOrigin = false;
   try { const u = new URL(origin); localOrigin = ['http:', 'https:'].includes(u.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname); } catch {}
@@ -936,6 +958,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, CORS);
     res.end();
+    return;
+  }
+  if (!authorized(req)) {
+    sendJson(res, 401, { error: 'Hosted Balabolka server requires a valid access token.' });
     return;
   }
 
@@ -1068,6 +1094,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, async () => {
+  if (remoteHosts.size) log(`Hosted mode enabled for host(s) ${[...remoteHosts].join(', ')} via an HTTPS reverse proxy; origin allowlist has ${extraOrigins.size} entries.`);
   log(`OS Speech Bridge listening on http://${HOST}:${PORT}`);
   log(`Platform: ${PLATFORM} · temp dir: ${TMP_DIR}`);
   const status = await refreshEngines(true);
