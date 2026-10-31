@@ -868,9 +868,9 @@ export function TtsStudioView() {
     if (!phrase) return;
     stopPreview();
     stopRenderedPlayback();
-    void synthesizeSpeech(` ${phrase}. `, {
-      profileId, rate: 1, pitch: 1, volume: 1, quality: 'fast',
-    }).then((buf) => {
+    void synthesizeWithSelectedEngine(` ${phrase}. `, {
+      model, profileId, rate: 1, pitch: 1, volume: 1, quality: 'fast',
+    }).then(({ buffer: buf }) => {
       const ctx = audioCtxRef.current ?? new AudioContext();
       audioCtxRef.current = ctx;
       audioSrcRef.current?.stop();
@@ -880,11 +880,11 @@ export function TtsStudioView() {
       src.onended = () => { if (audioSrcRef.current === src) audioSrcRef.current = null; };
       audioSrcRef.current = src;
       src.start();
-      setEngine({ ttsEngine: 'fallback' });
+      setEngine({ ttsEngine: 'os-bridge' });
     }).catch((e) => {
       toast({ title: 'Audition failed', description: e instanceof Error ? e.message : String(e), variant: 'destructive' });
     });
-  }, [profileId, stopPreview, stopRenderedPlayback, setEngine, toast]);
+  }, [model, profileId, stopPreview, stopRenderedPlayback, setEngine, toast]);
 
   const startPreview = useCallback(() => {
     if (!prepared.text.trim()) return;
@@ -893,7 +893,7 @@ export function TtsStudioView() {
     // OS-level models WITH the bridge running: preview through the real OS
     // engine (SAPI / say / espeak-ng / Piper) — the exact render path, so what
     // you hear in the preview is what the exported file sounds like.
-    if (isOsLevelModel && !settings.fallbackMode && bridgeUp) {
+    if (isOsLevelModel || model.engine === 'formant') {
       const previewText = prepared.text.length > 900 ? prepared.text.slice(0, 900) : prepared.text;
       setPlaying(true);
       void synthesizeWithSelectedEngine(previewText, {
@@ -1021,9 +1021,7 @@ export function TtsStudioView() {
       { type: 'tts-render', label: `Render ${formatNumber(words)} words → ${getFormat(formatId)?.label ?? formatId}` },
       async (api) => {
         api.log(
-          model.engine === 'formant' || settings.fallbackMode
-            ? 'Synthesizing with the built-in AuraVoice engine…'
-            : `Synthesizing with the selected engine (${model.name})…`,
+          `Synthesizing via Balabolka CMD (Piper when explicitly selected): ${model.name}…`,
         );
         // 1. synthesize via the ENGINE DISPATCHER — routes to the engine the user
         //    selected: OS bridge (SAPI / say / espeak-ng / Piper) for OS-level
